@@ -1,5 +1,6 @@
 {{define "jobs" -}}
-<section id="jobs" aria-live="polite"{{if .Active}} hx-get="/jobs" hx-trigger="every 2s" hx-swap="outerHTML"{{end}}>
+<section id="jobs" aria-live="polite"{{if or .Active .Unsaved}} hx-get="/jobs" hx-trigger="every 2s" hx-swap="outerHTML"{{end}}>
+  {{with .Unsaved}}<p class="error" role="alert">ukai cannot save the job list to disk (failing since {{.}}) and keeps trying. Until a save works, a restart would lose the changes since then: jobs that finished or were canceled would be queued and run again. See the ukai log.</p>{{end}}
   {{with .Error}}<p class="error" role="alert">{{.}}</p>{{end}}
   {{if not .Jobs}}<p class="empty">No downloads yet.</p>{{end}}
   <ol class="jobs">

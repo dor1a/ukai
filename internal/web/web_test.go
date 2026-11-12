@@ -29,6 +29,7 @@ type stubJobs struct {
 	views     []jobs.View
 	submitErr error
 	cancelErr error
+	unsaved   time.Time
 }
 
 func (s *stubJobs) Submit(u string, k store.Kind, q string) (store.Job, error) {
@@ -52,6 +53,12 @@ func (s *stubJobs) List() []jobs.View {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return append([]jobs.View(nil), s.views...)
+}
+
+func (s *stubJobs) UnsavedSince() time.Time {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.unsaved
 }
 
 type stubProber struct {
@@ -152,6 +159,30 @@ func TestListPollsOnlyWhileActive(t *testing.T) {
 	j.views = j.views[1:]
 	if b := do(h, "GET", "/jobs", nil, htmx).Body.String(); strings.Contains(b, "hx-trigger") {
 		t.Error("list keeps polling with no active jobs")
+	}
+}
+
+func TestListWarnsWhileUnsaved(t *testing.T) {
+	since := time.Date(2026, 11, 12, 9, 30, 0, 0, time.UTC)
+	j := &stubJobs{
+		views:   []jobs.View{{Job: store.Job{ID: "a", URL: "https://example.com/a", Kind: store.KindVideo, State: store.Canceled, CreatedAt: since}}},
+		unsaved: since,
+	}
+	h := server(t, j)
+	for _, target := range []string{"/", "/jobs"} {
+		b := do(h, "GET", target, nil, htmx).Body.String()
+		// The list keeps polling with nothing active, so the warning goes
+		// away once a save works.
+		for _, want := range []string{"cannot save the job list to disk (failing since " + since.Local().Format("2006-01-02 15:04") + ")", `hx-trigger="every 2s"`} {
+			if !strings.Contains(b, want) {
+				t.Errorf("%s lacks %q\n%s", target, want, b)
+			}
+		}
+	}
+
+	j.unsaved = time.Time{}
+	if b := do(h, "GET", "/jobs", nil, htmx).Body.String(); strings.Contains(b, "cannot save") || strings.Contains(b, "hx-trigger") {
+		t.Errorf("warning or polling left after a save\n%s", b)
 	}
 }
 

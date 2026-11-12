@@ -75,7 +75,9 @@ All settings are environment variables.
 | `UKAI_YTDLP` | `/usr/local/bin/yt-dlp` | yt-dlp binary |
 | `TZ` | UTC | Time zone of the times on the page, such as `Asia/Seoul`. The binary carries its own time zone data |
 
-`ukai healthcheck` exits 0 when the local server answers `/healthz`. The image uses it as its health check.
+`ukai healthcheck` exits 0 when the local server answers `/healthz`. The image uses it as its health check. It stays healthy when `jobs.json` cannot be saved: the jobs page shows a warning instead and ukai keeps trying, because a restart at that point would queue finished jobs again.
+
+ukai logs to stderr, one line per job event (`job queued`, `job started`, `job done`, `job failed`, `job canceled`, `job requeued`) with the job ID and URL.
 
 ## Development
 

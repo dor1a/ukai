@@ -32,6 +32,7 @@ type Jobs interface {
 	Submit(rawURL string, kind store.Kind, quality string) (store.Job, error)
 	Cancel(id string) error
 	List() []jobs.View
+	UnsavedSince() time.Time
 }
 
 // Prober looks up the qualities one video offers.
@@ -102,6 +103,8 @@ type listData struct {
 	Jobs   []row
 	Active bool
 	Error  string
+	// Unsaved is when saving the job list started failing, empty while saved.
+	Unsaved string
 }
 
 type pageData struct {
@@ -215,6 +218,9 @@ type row struct {
 func (s *Server) listData(errMsg string) listData {
 	views := s.jobs.List()
 	d := listData{Jobs: make([]row, 0, len(views)), Error: errMsg}
+	if t := s.jobs.UnsavedSince(); !t.IsZero() {
+		d.Unsaved = t.Local().Format("2006-01-02 15:04")
+	}
 	for _, v := range views {
 		d.Jobs = append(d.Jobs, toRow(v))
 		if v.Active() {

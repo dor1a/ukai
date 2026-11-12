@@ -5,6 +5,13 @@
 // memory only. Jobs that were queued or running when ukai stopped are queued
 // again on the next start, and their partial files are kept so yt-dlp can
 // continue them.
+//
+// Submit and canceling a queued job are refused when their save fails. Other
+// changes, such as the result of a running job, cannot be taken back, so
+// memory stays the truth: Run saves the whole list again every few seconds
+// and UnsavedSince reports the failure until a save works.
+//
+// Each job logs one line when it is queued, starts, ends, or is queued again.
 package jobs
 
 import (
@@ -86,6 +93,9 @@ var (
 
 const maxURLLength = 2048
 
+// saveRetryEvery is how often Run tries a failed save again.
+const saveRetryEvery = 5 * time.Second
+
 var validID = regexp.MustCompile(`^[0-9A-Za-z][0-9A-Za-z-]{0,63}$`)
 
 // Manager queues and runs jobs.
@@ -99,8 +109,12 @@ type Manager struct {
 	pending []string     // queued job IDs, oldest first
 	live    map[string]*Live
 	cancels map[string]context.CancelFunc
+	// unsavedSince is when saving a change first failed, zero while the saved
+	// list matches memory.
+	unsavedSince time.Time
 
-	wake chan struct{}
+	wake      chan struct{}
+	saveRetry time.Duration
 }
 
 // New loads the saved jobs, queues the unfinished ones again, and removes
@@ -113,12 +127,13 @@ func New(opt Options) (*Manager, error) {
 		return nil, errors.New("jobs: Workers and History must be at least 1")
 	}
 	m := &Manager{
-		opt:     opt,
-		log:     opt.Log,
-		now:     opt.Now,
-		live:    map[string]*Live{},
-		cancels: map[string]context.CancelFunc{},
-		wake:    make(chan struct{}, opt.Workers),
+		opt:       opt,
+		log:       opt.Log,
+		now:       opt.Now,
+		live:      map[string]*Live{},
+		cancels:   map[string]context.CancelFunc{},
+		wake:      make(chan struct{}, opt.Workers),
+		saveRetry: saveRetryEvery,
 	}
 	if m.log == nil {
 		m.log = slog.New(slog.DiscardHandler)
@@ -138,12 +153,14 @@ func New(opt Options) (*Manager, error) {
 		return nil, err
 	}
 	seen := map[string]bool{}
+	was := map[string]store.State{}
 	for _, j := range saved {
 		if !validID.MatchString(j.ID) || seen[j.ID] {
 			m.log.Warn("skipping a saved job with a bad or repeated ID", "id", j.ID)
 			continue
 		}
 		seen[j.ID] = true
+		was[j.ID] = j.State
 		if j.State == store.Running {
 			j.State = store.Queued
 			j.StartedAt = time.Time{}
@@ -163,6 +180,10 @@ func New(opt Options) (*Manager, error) {
 	m.trimLocked()
 	if err := m.saveLocked(); err != nil {
 		return nil, fmt.Errorf("save jobs: %w", err)
+	}
+	for _, id := range m.pending {
+		j := m.findLocked(id)
+		m.log.Info("job requeued", "job", id, "url", j.URL, "kind", j.Kind, "quality", j.Quality, "reason", "restart", "was", was[id])
 	}
 	return m, nil
 }
@@ -221,6 +242,7 @@ func (m *Manager) Submit(rawURL string, kind store.Kind, quality string) (store.
 	}
 	out := *j
 	m.mu.Unlock()
+	m.log.Info("job queued", "job", out.ID, "url", out.URL, "kind", out.Kind, "quality", out.Quality)
 
 	select {
 	case m.wake <- struct{}{}:
@@ -271,6 +293,7 @@ func (m *Manager) Cancel(id string) error {
 			return ErrSave
 		}
 		m.pending = slices.DeleteFunc(m.pending, func(p string) bool { return p == id })
+		m.log.Info("job canceled", "job", id, "url", j.URL, "was", store.Queued)
 		m.trimLocked()
 	case store.Running:
 		// The worker records the result when yt-dlp has stopped.
@@ -300,8 +323,18 @@ func (m *Manager) List() []View {
 	return out
 }
 
+// UnsavedSince returns when saving a change first failed, or the zero time
+// when the saved list matches memory. Any later save writes the whole list
+// and clears it.
+func (m *Manager) UnsavedSince() time.Time {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.unsavedSince
+}
+
 // Run starts the workers and blocks until ctx is done and every worker has
-// stopped. Jobs that were running are queued again for the next start.
+// stopped. Jobs that were running are queued again for the next start. While
+// a save has failed, Run tries it again every saveRetry.
 func (m *Manager) Run(ctx context.Context) {
 	var wg sync.WaitGroup
 	for range m.opt.Workers {
@@ -311,7 +344,39 @@ func (m *Manager) Run(ctx context.Context) {
 			m.worker(ctx)
 		}()
 	}
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		m.retrySaves(ctx)
+	}()
 	wg.Wait()
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if since := m.unsavedSince; !since.IsZero() {
+		if err := m.saveLocked(); err != nil {
+			m.log.Error("stopping with unsaved jobs", "since", since, "err", err)
+		}
+	}
+}
+
+// retrySaves saves the list again while a save has failed. The first failure
+// was logged and saveLocked logs the recovery, so retries stay quiet.
+func (m *Manager) retrySaves(ctx context.Context) {
+	t := time.NewTicker(m.saveRetry)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+		}
+		m.mu.Lock()
+		if !m.unsavedSince.IsZero() {
+			m.saveLocked()
+		}
+		m.mu.Unlock()
+	}
 }
 
 func (m *Manager) worker(ctx context.Context) {
@@ -347,6 +412,7 @@ func (m *Manager) take(ctx context.Context) (string, context.Context, context.Ca
 		m.live[id] = &Live{Total: -1, Speed: -1, ETA: -1}
 		jctx, cancel := context.WithCancel(ctx)
 		m.cancels[id] = cancel
+		m.log.Info("job started", "job", id, "url", j.URL, "kind", j.Kind, "quality", j.Quality)
 		m.saveOrLog()
 		req := ytdlp.Request{
 			URL:     j.URL,
@@ -395,21 +461,27 @@ func (m *Manager) run(ctx, jctx context.Context, cancel context.CancelFunc, id s
 
 	m.mu.Lock()
 	if j := m.findLocked(id); j != nil {
+		now := m.now()
+		took := now.Sub(j.StartedAt).Round(time.Millisecond)
 		switch {
 		case err == nil:
 			j.State = store.Done
-			j.FinishedAt = m.now()
+			j.FinishedAt = now
+			m.log.Info("job done", "job", id, "url", j.URL, "took", took, filesAttr(j.Files))
 		case stopping:
 			j.State = store.Queued
 			j.StartedAt = time.Time{}
 			m.pending = append([]string{id}, m.pending...)
+			m.log.Info("job requeued", "job", id, "url", j.URL, "took", took, "reason", "stopping")
 		case jctx.Err() != nil:
 			j.State = store.Canceled
-			j.FinishedAt = m.now()
+			j.FinishedAt = now
+			m.log.Info("job canceled", "job", id, "url", j.URL, "was", store.Running, "took", took)
 		default:
 			j.State = store.Failed
 			j.Error = err.Error()
-			j.FinishedAt = m.now()
+			j.FinishedAt = now
+			m.log.Warn("job failed", "job", id, "url", j.URL, "took", took, "err", j.Error)
 		}
 	}
 	delete(m.live, id)
@@ -417,6 +489,14 @@ func (m *Manager) run(ctx, jctx context.Context, cancel context.CancelFunc, id s
 	m.trimLocked()
 	m.saveOrLog()
 	m.mu.Unlock()
+}
+
+// filesAttr names the one file a job usually makes, or counts them.
+func filesAttr(files []string) slog.Attr {
+	if len(files) == 1 {
+		return slog.String("file", files[0])
+	}
+	return slog.Int("files", len(files))
 }
 
 func (m *Manager) update(id string, fn func(*store.Job)) {
@@ -469,17 +549,31 @@ func (m *Manager) trimLocked() {
 	m.jobs = kept
 }
 
+// saveLocked writes the whole list. A save that works also makes up for every
+// earlier one that failed.
 func (m *Manager) saveLocked() error {
 	out := make([]store.Job, len(m.jobs))
 	for i, j := range m.jobs {
 		out[i] = *j
 		out[i].Files = slices.Clone(j.Files)
 	}
-	return m.opt.Store.SaveJobs(out)
+	if err := m.opt.Store.SaveJobs(out); err != nil {
+		return err
+	}
+	if !m.unsavedSince.IsZero() {
+		m.log.Info("jobs saved again", "unsaved_for", m.now().Sub(m.unsavedSince).Round(time.Millisecond))
+		m.unsavedSince = time.Time{}
+	}
+	return nil
 }
 
+// saveOrLog saves a change that cannot be rolled back. On failure it logs and
+// marks the list unsaved, which Run retries and UnsavedSince reports.
 func (m *Manager) saveOrLog() {
 	if err := m.saveLocked(); err != nil {
 		m.log.Error("cannot save jobs", "err", err)
+		if m.unsavedSince.IsZero() {
+			m.unsavedSince = m.now()
+		}
 	}
 }

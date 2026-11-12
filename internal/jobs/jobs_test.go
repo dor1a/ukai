@@ -1,8 +1,10 @@
 package jobs
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -65,6 +67,7 @@ type env struct {
 	dl     string
 	store  *store.JSON
 	runner *fakeRunner
+	logs   *logBuffer
 }
 
 func newEnv(t *testing.T) *env {
@@ -74,19 +77,65 @@ func newEnv(t *testing.T) *env {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return &env{t: t, data: filepath.Join(dir, "data"), dl: filepath.Join(dir, "dl"), store: st, runner: newFakeRunner()}
+	return &env{t: t, data: filepath.Join(dir, "data"), dl: filepath.Join(dir, "dl"), store: st, runner: newFakeRunner(), logs: &logBuffer{}}
 }
 
 func (e *env) manager(workers, history int) *Manager {
 	e.t.Helper()
+	return e.managerOn(e.store, workers, history)
+}
+
+func (e *env) managerOn(st store.Store, workers, history int) *Manager {
+	e.t.Helper()
 	m, err := New(Options{
-		Store: e.store, Runner: e.runner, Workers: workers, History: history,
+		Store: st, Runner: e.runner, Workers: workers, History: history,
 		DownloadDir: e.dl, TempRoot: filepath.Join(e.data, "tmp"),
+		Log: slog.New(slog.NewTextHandler(e.logs, nil)),
 	})
 	if err != nil {
 		e.t.Fatal(err)
 	}
 	return m
+}
+
+// logBuffer collects log lines written by several goroutines.
+type logBuffer struct {
+	mu sync.Mutex
+	b  bytes.Buffer
+}
+
+func (l *logBuffer) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.b.Write(p)
+}
+
+func (l *logBuffer) String() string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.b.String()
+}
+
+// count returns how many lines contain every one of parts.
+func (l *logBuffer) count(parts ...string) int {
+	n := 0
+	for line := range strings.Lines(l.String()) {
+		all := true
+		for _, p := range parts {
+			all = all && strings.Contains(line, p)
+		}
+		if all {
+			n++
+		}
+	}
+	return n
+}
+
+func (l *logBuffer) want(t *testing.T, parts ...string) {
+	t.Helper()
+	if l.count(parts...) == 0 {
+		t.Errorf("no log line has all of %q\n%s", parts, l.String())
+	}
 }
 
 // start runs m until the test ends and returns a function that stops it and
@@ -328,6 +377,7 @@ func TestNewRequeuesRunningAndCleansTemp(t *testing.T) {
 	if len(entries) != 1 || entries[0].Name() != "20261112T090002Z-bbbbbbbb" {
 		t.Errorf("temp entries = %v, want only the queued job's", entries)
 	}
+	e.logs.want(t, `msg="job requeued"`, "job=20261112T090002Z-bbbbbbbb", "reason=restart", "was=running")
 }
 
 func TestHistoryLimit(t *testing.T) {
@@ -414,6 +464,9 @@ func TestCancelKeepsTheJobWhenSaveFails(t *testing.T) {
 	if len(m.pending) != 1 || m.pending[0] != j.ID {
 		t.Fatalf("pending = %v, want the job still queued", m.pending)
 	}
+	if !m.UnsavedSince().IsZero() {
+		t.Fatal("a cancel that was rolled back marked the list unsaved")
+	}
 
 	fs.set(false)
 	if err := m.Cancel(j.ID); err != nil {
@@ -491,5 +544,133 @@ func TestSubmitChecksQuality(t *testing.T) {
 		if (err == nil) != tc.ok || (err != nil && !errors.Is(err, ErrBadQuality)) {
 			t.Errorf("Submit(%s, %q) err = %v, want ok=%v", tc.kind, tc.quality, err, tc.ok)
 		}
+	}
+}
+
+func TestJobEventsAreLogged(t *testing.T) {
+	e := newEnv(t)
+	m := e.manager(1, 10)
+	stop := start(t, m)
+
+	ok, _ := m.Submit("https://example.com/ok", store.KindVideo, "1080")
+	waitFor(t, "done", stateIs(m, ok.ID, store.Done))
+	failed, _ := m.Submit("https://example.com/fail", store.KindAudio, "mp3-192")
+	waitFor(t, "failed", stateIs(m, failed.ID, store.Failed))
+	running, _ := m.Submit("https://example.com/block", store.KindVideo, "")
+	waitFor(t, "running", stateIs(m, running.ID, store.Running))
+	queued, _ := m.Submit("https://example.com/block", store.KindVideo, "")
+	if err := m.Cancel(queued.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.Cancel(running.ID); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "canceled", stateIs(m, running.ID, store.Canceled))
+	again, _ := m.Submit("https://example.com/block", store.KindAudio, "best")
+	waitFor(t, "running", stateIs(m, again.ID, store.Running))
+	stop()
+	e.manager(1, 10) // the next start queues it again
+
+	l := e.logs
+	l.want(t, "level=INFO", `msg="job queued"`, "job="+ok.ID, "url=https://example.com/ok", "kind=video", "quality=1080")
+	l.want(t, "level=INFO", `msg="job started"`, "job="+ok.ID, "url=https://example.com/ok", "kind=video", "quality=1080")
+	l.want(t, "level=INFO", `msg="job done"`, "job="+ok.ID, "took=", `file="Example [abc123].mp4"`)
+	l.want(t, "level=INFO", `msg="job started"`, "job="+failed.ID, "kind=audio", "quality=mp3-192")
+	l.want(t, "level=WARN", `msg="job failed"`, "job="+failed.ID, "took=", `err="[example] x: This video is unavailable"`)
+	l.want(t, "level=INFO", `msg="job canceled"`, "job="+queued.ID, "was=queued")
+	l.want(t, "level=INFO", `msg="job canceled"`, "job="+running.ID, "was=running", "took=")
+	l.want(t, "level=INFO", `msg="job requeued"`, "job="+again.ID, "reason=stopping", "took=")
+	l.want(t, "level=INFO", `msg="job requeued"`, "job="+again.ID, "reason=restart", "was=queued", "kind=audio", "quality=best")
+	for _, id := range []string{ok.ID, failed.ID, running.ID, queued.ID, again.ID} {
+		if n := l.count("job=" + id); n < 2 {
+			t.Errorf("job %s has %d log lines, want at least queued and its end", id, n)
+		}
+	}
+	t.Log("\n" + l.String())
+}
+
+// unsavedCancel runs a job on a store that starts failing, cancels the job,
+// and checks that the lost save of its final state is reported.
+func unsavedCancel(t *testing.T, e *env, retry time.Duration) (*Manager, *flakyStore, store.Job, func()) {
+	t.Helper()
+	fs := &flakyStore{Store: e.store}
+	m := e.managerOn(fs, 1, 10)
+	m.saveRetry = retry
+	stop := start(t, m)
+	j, err := m.Submit("https://example.com/block", store.KindVideo, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "running", stateIs(m, j.ID, store.Running))
+
+	fs.set(true)
+	if err := m.Cancel(j.ID); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "canceled", stateIs(m, j.ID, store.Canceled))
+	if m.UnsavedSince().IsZero() {
+		t.Fatal("the failed save of a final state is not reported")
+	}
+	if saved, _ := e.store.LoadJobs(); len(saved) != 1 || saved[0].State != store.Running {
+		t.Fatalf("saved = %+v, want the job still running on disk", saved)
+	}
+	e.logs.want(t, "level=ERROR", `msg="cannot save jobs"`, "disk full")
+	return m, fs, j, stop
+}
+
+func TestFailedFinalSaveIsRetried(t *testing.T) {
+	e := newEnv(t)
+	m, fs, j, _ := unsavedCancel(t, e, 10*time.Millisecond)
+	since := m.UnsavedSince()
+
+	// Retries that fail keep the first failure and do not log again.
+	time.Sleep(60 * time.Millisecond)
+	if got := m.UnsavedSince(); !got.Equal(since) {
+		t.Errorf("unsaved since %v, want the first failure %v", got, since)
+	}
+	if n := e.logs.count(`msg="cannot save jobs"`); n != 1 {
+		t.Errorf("%d save failures logged, want only the first", n)
+	}
+
+	fs.set(false)
+	waitFor(t, "a retry to save", func() bool { return m.UnsavedSince().IsZero() })
+	if saved, _ := e.store.LoadJobs(); len(saved) != 1 || saved[0].State != store.Canceled {
+		t.Fatalf("saved = %+v, want the job canceled", saved)
+	}
+	e.logs.want(t, "level=INFO", `msg="jobs saved again"`, "unsaved_for=")
+	if v := find(m, j.ID); v.State != store.Canceled {
+		t.Fatalf("job = %+v", v.Job)
+	}
+	t.Log("\n" + e.logs.String())
+}
+
+func TestNextSaveClearsUnsaved(t *testing.T) {
+	e := newEnv(t)
+	m, fs, j, _ := unsavedCancel(t, e, time.Hour)
+	fs.set(false)
+	next, err := m.Submit("https://example.com/block", store.KindVideo, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !m.UnsavedSince().IsZero() {
+		t.Fatal("a save that worked did not clear the warning")
+	}
+	saved, _ := e.store.LoadJobs()
+	if len(saved) != 2 || saved[0].ID != next.ID || saved[1].ID != j.ID || saved[1].State != store.Canceled {
+		t.Fatalf("saved = %+v, want the new job and the canceled one", saved)
+	}
+}
+
+func TestStopWithUnsavedJobsIsLogged(t *testing.T) {
+	e := newEnv(t)
+	m, _, j, stop := unsavedCancel(t, e, time.Hour)
+	stop()
+	e.logs.want(t, "level=ERROR", `msg="stopping with unsaved jobs"`, "since=", "disk full")
+	if m.UnsavedSince().IsZero() {
+		t.Fatal("warning cleared without a save")
+	}
+	// This is what the warning is about: the next start runs the job again.
+	if v := find(e.manager(1, 10), j.ID); v.State != store.Queued {
+		t.Fatalf("after restart state = %s, want queued", v.State)
 	}
 }

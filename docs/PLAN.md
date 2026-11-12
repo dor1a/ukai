@@ -85,8 +85,9 @@ All settings are environment variables. Defaults marked `draft` may change.
 - File names carry the quality, so two qualities of one video never share a file: `Title [id] 1920x1080.webm`, `Title [id] 251.opus` (format ID), `Title [id] 320k.mp3`.
 - A queue with `UKAI_CONCURRENCY` workers. Jobs can be cancelled.
 - One yt-dlp run per job. Metadata comes from `--print before_dl:` lines and the final path from `--print after_move:`, progress from `--progress-template` lines. The jobs page shows them with HTMX polling while anything is queued or running.
-- `store` behind an interface, backed by JSON files written atomically. Only the last `UKAI_JOB_HISTORY` finished jobs are kept.
-- `/healthz` for the container health check.
+- `store` behind an interface, backed by JSON files written atomically. Only the last `UKAI_JOB_HISTORY` finished jobs are kept. When a change that cannot be taken back (such as a running job's result) fails to save, memory stays the truth: the jobs page warns, and ukai saves the whole list again every 5 seconds until it works.
+- One log line per job event (queued, started, done, failed, canceled, requeued) with the job ID.
+- `/healthz` for the container health check. It stays healthy while saves fail, since a restart would queue finished jobs again.
 - Tests run against a fake yt-dlp script that prints recorded metadata and progress lines.
 
 ### 2. Sign-in
