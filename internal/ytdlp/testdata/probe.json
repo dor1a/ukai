@@ -1,0 +1,23 @@
+{
+  "_type": "video",
+  "id": "abc123",
+  "title": "Example <title>",
+  "formats": [
+    {"format_id": "sb0", "ext": "mhtml", "vcodec": "none", "acodec": "none", "height": 45, "format_note": "storyboard"},
+    {"format_id": "139", "ext": "m4a", "vcodec": "none", "acodec": "mp4a.40.5", "abr": 48.8, "format_note": "low"},
+    {"format_id": "249", "ext": "webm", "vcodec": "none", "acodec": "opus", "abr": 50.1, "format_note": "low"},
+    {"format_id": "251-drc", "ext": "webm", "vcodec": "none", "acodec": "opus", "abr": 128.2, "format_note": "medium, DRC"},
+    {"format_id": "140", "ext": "m4a", "vcodec": "none", "acodec": "mp4a.40.2", "abr": 129.6, "format_note": "medium"},
+    {"format_id": "251", "ext": "webm", "vcodec": "none", "acodec": "opus", "abr": 129.477, "format_note": "medium"},
+    {"format_id": "251-dup", "ext": "webm", "vcodec": "none", "acodec": "opus", "abr": 129.4, "format_note": "medium"},
+    {"format_id": "bad id!", "ext": "webm", "vcodec": "none", "acodec": "opus", "abr": 300},
+    {"format_id": "hls-a", "ext": "mp4", "vcodec": "none", "tbr": 64},
+    {"format_id": "160", "ext": "mp4", "vcodec": "avc1.4d400c", "acodec": "none", "height": 144, "fps": 30},
+    {"format_id": "278", "ext": "webm", "vcodec": "vp9", "acodec": "none", "height": 144, "fps": 25},
+    {"format_id": "18", "ext": "mp4", "vcodec": "avc1.42001E", "acodec": "mp4a.40.2", "height": 360, "fps": 30},
+    {"format_id": "http-480", "ext": "mp4", "height": 480},
+    {"format_id": "136", "ext": "mp4", "vcodec": "avc1.4d401f", "acodec": "none", "height": 720, "fps": 30},
+    {"format_id": "298", "ext": "mp4", "vcodec": "avc1.4d4020", "acodec": "none", "height": 720, "fps": 60},
+    {"format_id": "299", "ext": "mp4", "vcodec": "avc1.64002a", "acodec": "none", "height": 1080, "fps": 59.94}
+  ]
+}

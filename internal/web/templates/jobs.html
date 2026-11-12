@@ -1,0 +1,30 @@
+{{define "jobs" -}}
+<section id="jobs" aria-live="polite"{{if .Active}} hx-get="/jobs" hx-trigger="every 2s" hx-swap="outerHTML"{{end}}>
+  {{with .Error}}<p class="error" role="alert">{{.}}</p>{{end}}
+  {{if not .Jobs}}<p class="empty">No downloads yet.</p>{{end}}
+  <ol class="jobs">
+  {{range .Jobs}}
+    <li class="job state-{{.State}}">
+      <div class="head">
+        <a class="title" href="{{.URL}}" rel="noopener noreferrer" target="_blank">{{.Title}}</a>
+        <span class="badge">{{.Kind}}</span>
+        <span class="badge">{{.Quality}}</span>
+        <span class="badge state">{{.State}}</span>
+      </div>
+      {{if ge .Percent 0}}<progress max="100" value="{{.Percent}}">{{.Percent}}%</progress>{{end}}
+      {{with .Progress}}<p class="progress">{{.}}</p>{{end}}
+      {{with .Error}}<p class="job-error">{{.}}</p>{{end}}
+      {{with .Files}}<ul class="files">{{range .}}<li>{{.}}</li>{{end}}</ul>{{end}}
+      <div class="foot">
+        <time>{{.When}}</time>
+        {{if .CanCancel}}
+        <form method="post" action="/jobs/{{.ID}}/cancel" hx-post="/jobs/{{.ID}}/cancel" hx-target="#jobs" hx-swap="outerHTML">
+          <button type="submit" class="secondary">Cancel</button>
+        </form>
+        {{end}}
+      </div>
+    </li>
+  {{end}}
+  </ol>
+</section>
+{{- end}}

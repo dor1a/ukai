@@ -1,6 +1,6 @@
 # ukai plan
 
-> Status: planning. Nothing is implemented yet. Values marked `draft` are starting points and may change while phase 1 is built.
+> Status: phase 1 is built, with the image and the GitHub Actions build from phase 4 (amd64 only). Phases 2 to 5 are otherwise plans. Values marked `draft` are starting points and may change.
 
 ## Summary
 
@@ -40,11 +40,11 @@ ytdl-material bundles yt-dlp with the Python of its image. When yt-dlp dropped s
             │ web       HTMX pages: submit URL, jobs, subscriptions        │
             │ jobs      queue and workers (UKAI_CONCURRENCY at a time)     │
             │ subs      periodic check of each subscription                │
-            │ ytdlp     runs yt-dlp, reads -J metadata and progress lines  │
+            │ ytdlp     runs yt-dlp, reads its printed lines and formats   │
             │ store     JSON files, atomic writes (temp file + rename)     │
             └───────┬───────────────────────────┬─────────────────────────┘
                     │                           │
-           yt-dlp ─▶ ffmpeg (audio → mp3)   UKAI_DATA_DIR
+           yt-dlp ─▶ ffmpeg (merge, MP3)    UKAI_DATA_DIR
            (Deno solves YouTube JS)          subscriptions.json, jobs.json,
                     │                        archive/<subscription>.txt
                     ▼
@@ -79,9 +79,12 @@ All settings are environment variables. Defaults marked `draft` may change.
 
 ### 1. Download one URL
 
-- Submit a URL with a choice of video or audio. Audio is converted to MP3 at 320 kbps right after download.
+- Submit a URL with a choice of video or audio. Video defaults to the best quality. Audio defaults to the best original stream, kept as it is without re-encoding.
+- Other qualities are choices. Before a lookup, video offers Best only and audio offers Best plus MP3 at 320, 256, 192 or 128 kbps. "Show qualities" asks yt-dlp for the formats of that URL (`--dump-single-json`) and adds every height the video has (a cap: yt-dlp takes the largest at or below it) and every original audio format. Video sizes are counted by the shorter side, as yt-dlp's `res` and YouTube do, so a portrait 1080x1920 video is 1080p. At most two lookups run at once, each for at most 90 seconds.
+- An original audio format belongs to the URL it was looked up for. A download with that format and a different URL is refused.
+- File names carry the quality, so two qualities of one video never share a file: `Title [id] 1920x1080.webm`, `Title [id] 251.opus` (format ID), `Title [id] 320k.mp3`.
 - A queue with `UKAI_CONCURRENCY` workers. Jobs can be cancelled.
-- Metadata from `yt-dlp -J`, progress from `--progress-template` lines, shown on the jobs page with HTMX polling.
+- One yt-dlp run per job. Metadata comes from `--print before_dl:` lines and the final path from `--print after_move:`, progress from `--progress-template` lines. The jobs page shows them with HTMX polling while anything is queued or running.
 - `store` behind an interface, backed by JSON files written atomically. Only the last `UKAI_JOB_HISTORY` finished jobs are kept.
 - `/healthz` for the container health check.
 - Tests run against a fake yt-dlp script that prints recorded metadata and progress lines.
@@ -104,7 +107,7 @@ All settings are environment variables. Defaults marked `draft` may change.
 ### 4. Image and deployment
 
 - Multi-stage Dockerfile: build the Go binary, then a runtime image with ffmpeg, Deno and the yt-dlp release binary. The yt-dlp version is pinned and its file is checked against the SHA-256 sums published with the release.
-- GitHub Actions: tests on every push, image to `ghcr.io/dor1a/ukai` on tags.
+- GitHub Actions: tests on every push, image to `ghcr.io/dor1a/ukai` on tags. Built for amd64 only: the runtime stage installs ffmpeg with apt, which needs QEMU for arm64.
 - Compose example for one host. The port stays on the internal network; outside access goes through the proxy in front.
 
 ### 5. API for bots and scripts
@@ -130,4 +133,3 @@ All settings are environment variables. Defaults marked `draft` may change.
 | -- | -- |
 | How to update yt-dlp | Rebuild the image with a new pinned version, or allow an update inside the container. Rebuilding keeps the checksum check |
 | `UKAI_SUBS_INTERVAL` default | 6 hours is a guess |
-| Output file names | yt-dlp's default template or a fixed one such as `%(uploader)s/%(title)s [%(id)s].%(ext)s` |

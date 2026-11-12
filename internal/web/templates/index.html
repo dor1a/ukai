@@ -1,0 +1,73 @@
+{{define "index" -}}
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="htmx-config" content='{"includeIndicatorStyles":false,"allowEval":false}'>
+<title>ukai</title>
+<link rel="icon" href="{{asset "favicon.svg"}}">
+<link rel="stylesheet" href="{{asset "style.css"}}">
+<script src="{{asset "htmx.min.js"}}" defer></script>
+<script src="{{asset "app.js"}}" defer></script>
+</head>
+<body>
+<main>
+<header>
+  <img src="{{asset "favicon.svg"}}" alt="" width="40" height="40">
+  <h1>ukai</h1>
+</header>
+
+<form class="submit" method="post" action="/jobs" hx-post="/jobs" hx-target="#jobs" hx-swap="outerHTML">
+  <label for="url">Video URL</label>
+  <div class="row">
+    <input id="url" name="url" type="url" required autocomplete="off" placeholder="https://" value="{{.URL}}">
+    <button type="submit">Download</button>
+  </div>
+  <div class="lookup">
+    <button type="submit" class="secondary" formaction="/probe" hx-post="/probe" hx-target="#options" hx-swap="outerHTML" hx-indicator="#looking" hx-disabled-elt="this">Show qualities</button>
+    <span id="looking" class="indicator" role="status">Asking yt-dlp…</span>
+  </div>
+  {{template "options" .Options}}
+  {{with .Error}}<p class="error" role="alert">{{.}}</p>{{end}}
+</form>
+
+{{template "jobs" .List}}
+</main>
+<footer>ukai {{.Version}}</footer>
+</body>
+</html>
+{{- end}}
+
+{{define "options" -}}
+<fieldset id="options"{{if .OOB}} hx-swap-oob="true"{{end}}>
+  <legend>Save as</legend>
+  <input type="hidden" name="probed_url" value="{{.ProbedURL}}">
+  <div class="choice">
+    <label><input type="radio" name="kind" value="video"{{if ne .Kind "audio"}} checked{{end}}> Video</label>
+    <select name="video_quality" aria-label="Video quality">
+      <option value="best"{{if eq .VideoQuality "best"}} selected{{end}}>Best</option>
+      {{- with .Heights}}
+      <optgroup label="Up to">{{range .}}<option value="{{.Value}}"{{if eq .Value $.VideoQuality}} selected{{end}}>{{.Label}}</option>{{end}}</optgroup>
+      {{- end}}
+    </select>
+  </div>
+  <div class="choice">
+    <label><input type="radio" name="kind" value="audio"{{if eq .Kind "audio"}} checked{{end}}> Audio</label>
+    <select name="audio_quality" aria-label="Audio quality">
+      <option value="best"{{if eq .AudioQuality "best"}} selected{{end}}>Best (original)</option>
+      {{- with .Formats}}
+      <optgroup label="Original format">{{range .}}<option value="{{.Value}}"{{if eq .Value $.AudioQuality}} selected{{end}}>{{.Label}}</option>{{end}}</optgroup>
+      {{- end}}
+      <optgroup label="Convert to MP3">{{range .MP3}}<option value="{{.Value}}"{{if eq .Value $.AudioQuality}} selected{{end}}>{{.Label}}</option>{{end}}</optgroup>
+    </select>
+  </div>
+  {{with .Title}}<p class="probed">Qualities of {{.}}</p>{{end}}
+  {{with .Error}}<p class="error" role="alert">{{.}}</p>{{end}}
+</fieldset>
+{{- end}}
+
+{{define "submitted" -}}
+{{template "jobs" .List}}
+{{template "options" .Options}}
+{{- end}}

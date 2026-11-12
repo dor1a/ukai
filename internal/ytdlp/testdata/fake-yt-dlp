@@ -1,0 +1,87 @@
+#!/bin/sh
+# Fake yt-dlp for tests. It ignores the templates in its arguments and prints
+# lines in the format those templates produce with the real program.
+# The URL decides what happens:
+#   *fail*    print an error and exit 1
+#   *slow*    report progress, then wait on a child process until killed
+#   *escape*  leave a child in its own session that ignores SIGTERM and keeps
+#             the output open, then "download" one file and exit 0
+#   *quiet*   close the output at once, then exit 0 a little later
+#   other     "download" one file and exit 0
+# With --dump-single-json it prints the file named by FAKE_YTDLP_PROBE, or a
+# playlist for *playlist*, or the error for *fail*.
+out="" tmp="" audio=0 url="" probe=0
+while [ $# -gt 0 ]; do
+	case "$1" in
+	--paths)
+		case "$2" in
+		temp:*) tmp="${2#temp:}" ;;
+		*) out="$2" ;;
+		esac
+		shift 2
+		;;
+	--extract-audio) audio=1; shift ;;
+	--dump-single-json) probe=1; shift ;;
+	--) url="$2"; shift 2 ;;
+	*) shift ;;
+	esac
+done
+
+if [ "$probe" = 1 ]; then
+	case "$url" in
+	*fail*)
+		echo "ERROR: [example] fail1: This video is unavailable" >&2
+		exit 1
+		;;
+	*playlist*)
+		echo '{"_type": "playlist", "title": "A playlist", "entries": []}'
+		exit 0
+		;;
+	esac
+	cat "$FAKE_YTDLP_PROBE"
+	exit
+fi
+
+echo "[youtube] noise that ukai must ignore"
+case "$url" in
+*quiet*)
+	exec >/dev/null 2>&1
+	sleep 0.2
+	exit 0
+	;;
+*escape*)
+	mkdir -p "$tmp"
+	setsid sh -c 'trap "" TERM; echo $$ > "$1/escape.pid"; exec sleep 30' sh "$tmp" &
+	while [ ! -s "$tmp/escape.pid" ]; do sleep 0.05; done
+	;;
+*fail*)
+	echo "WARNING: something minor" >&2
+	echo "ERROR: [example] fail1: This video is unavailable" >&2
+	exit 1
+	;;
+*slow*)
+	echo 'ukai-meta id "slow1"'
+	echo 'ukai-meta title "Slow video"'
+	echo 'ukai-meta uploader NA'
+	echo 'ukai-meta duration NA'
+	echo 'ukai-progress 1024 NA 4096 512.5 6'
+	mkdir -p "$tmp"
+	sleep 30 &
+	echo $! > "$tmp/child.pid"
+	wait
+	exit 0
+	;;
+esac
+
+ext=mp4
+[ "$audio" = 1 ] && ext=mp3
+echo 'ukai-meta id "abc123"'
+echo 'ukai-meta title "Example \"title\""'
+echo 'ukai-meta uploader "Example uploader"'
+echo 'ukai-meta duration 19'
+echo 'ukai-progress 1024 2048 NA NA NA'
+echo 'ukai-progress 2048 2048 NA 1048576.5 0'
+mkdir -p "$out"
+f="$out/Example title [abc123].$ext"
+: > "$f"
+printf 'ukai-file "%s"\n' "$f"
