@@ -30,8 +30,10 @@ jobs:
       - run: go vet ./...
       - run: go test -race ./...
 
-  # amd64 only: the runtime stage installs ffmpeg with apt, which needs QEMU
-  # for arm64. The layer cache lives in the registry, so the next tag can read it.
+  # amd64 only: ffmpeg is compiled on the target platform and the runtime stage
+  # runs apt, so arm64 would need QEMU. The layer cache lives in the registry,
+  # so the next tag can read it; ffmpeg compiles again only for a new source or
+  # base image.
   image:
     needs: test
     if: startsWith(github.ref, 'refs/tags/v')

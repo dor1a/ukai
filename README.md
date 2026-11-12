@@ -56,9 +56,11 @@ The image is `linux/amd64` and contains:
 | -- | -- | -- |
 | yt-dlp | 2026.10.26, release binary checked against its SHA-256 | Downloads |
 | Deno | 2.9.8, checked the same way | yt-dlp needs it to solve YouTube's JavaScript challenges |
-| ffmpeg | Debian trixie package | Merges video and audio, converts to MP3 |
+| ffmpeg | 9.0.2, built from the release source checked against its SHA-256 | Merges video and audio, converts to MP3 |
 
 A newer yt-dlp comes with a new image.
+
+ffmpeg is configured with `--enable-version3` and without the GPL parts, so the build is under the LGPL v3. Its licence files are in `/usr/share/doc/ffmpeg/` in the image, and its source is the release tarball from ffmpeg.org named in the Dockerfile.
 
 ## Settings
 

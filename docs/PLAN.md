@@ -108,7 +108,7 @@ All settings are environment variables. Defaults marked `draft` may change.
 ### 4. Image and deployment
 
 - Multi-stage Dockerfile: build the Go binary, then a runtime image with ffmpeg, Deno and the yt-dlp release binary. The yt-dlp version is pinned and its file is checked against the SHA-256 sums published with the release.
-- GitHub Actions: tests on every push, image to `ghcr.io/dor1a/ukai` on tags. Built for amd64 only: the runtime stage installs ffmpeg with apt, which needs QEMU for arm64.
+- GitHub Actions: tests on every push, image to `ghcr.io/dor1a/ukai` on tags. Built for amd64 only: ffmpeg is compiled on the target platform and the runtime stage runs apt, so arm64 would need QEMU.
 - Compose example for one host. The port stays on the internal network; outside access goes through the proxy in front.
 
 ### 5. API for bots and scripts
