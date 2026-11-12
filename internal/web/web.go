@@ -12,6 +12,7 @@ import (
 	"io/fs"
 	"log/slog"
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -52,6 +53,7 @@ type Server struct {
 	jobs    Jobs
 	prober  Prober
 	slots   chan struct{}
+	probes  *probes
 	log     *slog.Logger
 	version string
 	tpl     *template.Template
@@ -68,7 +70,7 @@ func New(j Jobs, p Prober, log *slog.Logger, version string) (*Server, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Server{jobs: j, prober: p, slots: make(chan struct{}, probeSlots), log: log, version: version, tpl: tpl}, nil
+	return &Server{jobs: j, prober: p, slots: make(chan struct{}, probeSlots), probes: newProbes(probeMax, probeKeep), log: log, version: version, tpl: tpl}, nil
 }
 
 // Handler returns the routes, guarded against cross-site form posts.
@@ -338,10 +340,10 @@ func (s *Server) submit(w http.ResponseWriter, r *http.Request) {
 		quality = f.AudioQuality
 	}
 	var msg string
-	if kind == store.KindAudio && strings.HasPrefix(quality, "fmt-") && !sameURL(f.URL, f.ProbedURL) {
-		// Format IDs belong to the video that was looked up.
-		msg = "The listed formats belong to another URL. Look up the qualities again or choose Best."
-	} else {
+	if kind == store.KindAudio && strings.HasPrefix(quality, "fmt-") {
+		msg = s.formatMessage(f, quality)
+	}
+	if msg == "" {
 		_, err := s.jobs.Submit(f.URL, kind, quality)
 		msg = s.userMessage(err)
 	}
@@ -363,6 +365,28 @@ func (s *Server) submit(w http.ResponseWriter, r *http.Request) {
 	default:
 		http.Redirect(w, r, "/", http.StatusSeeOther)
 	}
+}
+
+// formatMessage says why the original format q cannot be downloaded from
+// f.URL, or returns "". Format IDs belong to the video they were looked up
+// for, so q must be in an unexpired lookup of the same URL.
+func (s *Server) formatMessage(f formValues, q string) string {
+	u, err := jobs.CheckURL(f.URL)
+	if err != nil {
+		return s.userMessage(err)
+	}
+	if !sameURL(f.URL, f.ProbedURL) {
+		// The URL was changed after the lookup.
+		return "The listed formats belong to another URL. Look up the qualities again or choose Best."
+	}
+	offered, ok := s.probes.offered(u)
+	switch {
+	case !ok:
+		return "The lookup for this URL has expired or was lost in a restart. Look up the qualities again or choose Best."
+	case !slices.Contains(offered, q):
+		return "The lookup for this URL did not list this format. Look up the qualities again or choose Best."
+	}
+	return ""
 }
 
 // sameURL reports whether two posted URLs are the same once checked.
@@ -396,6 +420,7 @@ func (s *Server) probe(w http.ResponseWriter, r *http.Request) {
 		}
 		o = options(f, &found)
 		o.ProbedURL = u
+		s.probes.remember(u, found.Audio)
 	}
 	if isHTMX(r) {
 		s.render(w, http.StatusOK, "options", o)

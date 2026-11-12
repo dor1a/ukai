@@ -209,7 +209,12 @@ func TestSubmitHTMX(t *testing.T) {
 
 func TestSubmitRejectsFormatsOfAnotherURL(t *testing.T) {
 	j := &stubJobs{}
-	h := server(t, j)
+	h := serverWith(t, j, &stubProber{formats: found})
+	// Both URLs were looked up, so only the form tells that the URL was
+	// changed after the lookup of the old one.
+	for _, u := range []string{"https://example.com/old", "https://example.com/new"} {
+		do(h, "POST", "/probe", url.Values{"url": {u}}, htmx)
+	}
 	form := url.Values{"url": {"https://example.com/new"}, "kind": {"audio"}, "audio_quality": {"fmt-251"}, "probed_url": {"https://example.com/old"}}
 	rec := do(h, "POST", "/jobs", form, htmx)
 	if rec.Header().Get("X-Ukai-Error") != "1" || !strings.Contains(rec.Body.String(), "belong to another URL") {
@@ -348,9 +353,11 @@ func TestLookupWaitsForASlot(t *testing.T) {
 
 func TestFailedPostKeepsALookedUpChoice(t *testing.T) {
 	j := &stubJobs{submitErr: jobs.ErrSave}
-	rec := do(server(t, j), "POST", "/jobs", url.Values{"url": {"https://example.com/v"}, "kind": {"audio"}, "audio_quality": {"fmt-251"}, "video_quality": {"1080"}, "probed_url": {"https://example.com/v"}}, nil)
+	h := serverWith(t, j, &stubProber{formats: found})
+	do(h, "POST", "/probe", url.Values{"url": {"https://example.com/v"}}, nil)
+	rec := do(h, "POST", "/jobs", url.Values{"url": {"https://example.com/v"}, "kind": {"audio"}, "audio_quality": {"fmt-251"}, "video_quality": {"1080"}, "probed_url": {"https://example.com/v"}}, nil)
 	b := rec.Body.String()
-	for _, want := range []string{`<option value="fmt-251" selected>Original format 251</option>`, `<option value="1080" selected>1080p</option>`, `name="probed_url" value="https://example.com/v"`} {
+	for _, want := range []string{"See the ukai log.", `<option value="fmt-251" selected>Original format 251</option>`, `<option value="1080" selected>1080p</option>`, `name="probed_url" value="https://example.com/v"`} {
 		if !strings.Contains(b, want) {
 			t.Errorf("page lacks %q\n%s", want, b)
 		}

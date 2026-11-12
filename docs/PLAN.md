@@ -81,7 +81,7 @@ All settings are environment variables. Defaults marked `draft` may change.
 
 - Submit a URL with a choice of video or audio. Video defaults to the best quality. Audio defaults to the best original stream, kept as it is without re-encoding.
 - Other qualities are choices. Before a lookup, video offers Best only and audio offers Best plus MP3 at 320, 256, 192 or 128 kbps. "Show qualities" asks yt-dlp for the formats of that URL (`--dump-single-json`) and adds every height the video has (a cap: yt-dlp takes the largest at or below it) and every original audio format. Video sizes are counted by the shorter side, as yt-dlp's `res` and YouTube do, so a portrait 1080x1920 video is 1080p. At most two lookups run at once, each for at most 90 seconds.
-- An original audio format belongs to the URL it was looked up for. A download with that format and a different URL is refused.
+- An original audio format belongs to the URL it was looked up for. The server keeps each lookup in memory for an hour (at most 256 URLs) and accepts an original format only if that lookup of the same URL listed it. A download with that format and a different URL is refused. After a restart or an hour, the user looks the qualities up again.
 - File names carry the quality, so two qualities of one video never share a file: `Title [id] 1920x1080.webm`, `Title [id] 251.opus` (format ID), `Title [id] 320k.mp3`.
 - A queue with `UKAI_CONCURRENCY` workers. Jobs can be cancelled.
 - One yt-dlp run per job. Metadata comes from `--print before_dl:` lines and the final path from `--print after_move:`, progress from `--progress-template` lines. The jobs page shows them with HTMX polling while anything is queued or running.
