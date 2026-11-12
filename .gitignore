@@ -1,0 +1,4 @@
+/ukai
+/dist/
+*.test
+.env
