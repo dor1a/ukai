@@ -188,17 +188,19 @@ func TestParserMeta(t *testing.T) {
 		`ukai-meta id "a1"`,
 		`ukai-meta title "Tab\there \"quoted\""`,
 		`ukai-meta uploader NA`,
+		`ukai-meta thumbnail "https://i.ytimg.com/vi/a1/hq720.jpg"`,
 		`ukai-meta duration 19.5`,
 		`[download] ignored`,
 		`ukai-meta id "b2"`,
 		`ukai-meta title NA`,
 		`ukai-meta uploader "U"`,
+		`ukai-meta thumbnail NA`,
 		`ukai-meta duration NA`,
 	} {
 		p.line(l)
 	}
 	want := []Meta{
-		{ID: "a1", Title: "Tab\there \"quoted\"", Duration: 19.5},
+		{ID: "a1", Title: "Tab\there \"quoted\"", Thumbnail: "https://i.ytimg.com/vi/a1/hq720.jpg", Duration: 19.5},
 		{ID: "b2", Uploader: "U"},
 	}
 	if !slices.Equal(got, want) {

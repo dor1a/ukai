@@ -87,7 +87,7 @@ func serve() error {
 	if err != nil {
 		return err
 	}
-	site, err := web.New(mgr, runner, log, version)
+	site, err := web.New(mgr, runner, cfg.DownloadDir, log, version)
 	if err != nil {
 		return err
 	}

@@ -9,5 +9,51 @@ document.addEventListener("htmx:afterRequest", function (event) {
   var xhr = event.detail.xhr;
   if (event.detail.successful && xhr && !xhr.getResponseHeader("X-Ukai-Error")) {
     form.reset();
+    // After a partly queued batch the box was swapped in holding the URLs
+    // left, which reset() would bring back, so empty it outright.
+    var box = form.querySelector("textarea");
+    if (box) {
+      box.value = "";
+      box.defaultValue = "";
+    }
+  }
+});
+
+// Enter in the URL box queues the download, as the single-line field did.
+// Shift+Enter starts a new line for another URL.
+document.addEventListener("keydown", function (event) {
+  var box = event.target;
+  if (event.key !== "Enter" || event.shiftKey || event.isComposing || !box.matches || !box.matches("form.submit textarea")) {
+    return;
+  }
+  event.preventDefault();
+  box.form.requestSubmit();
+});
+
+// Keep the job list's own refresh from replacing it while something in it is
+// playing: the swap would move the player and could stop it. The refresh is
+// skipped before it is sent, and also when playback started while it was on
+// its way. The next tick tries again.
+function playing(list) {
+  var media = list.querySelectorAll("audio, video");
+  for (var i = 0; i < media.length; i++) {
+    if (!media[i].paused) {
+      return true;
+    }
+  }
+  return false;
+}
+
+document.addEventListener("htmx:beforeRequest", function (event) {
+  var list = event.detail.elt;
+  if (list && list.id === "jobs" && playing(list)) {
+    event.preventDefault();
+  }
+});
+
+document.addEventListener("htmx:beforeSwap", function (event) {
+  var list = event.detail.elt;
+  if (list && list.id === "jobs" && playing(list)) {
+    event.detail.shouldSwap = false;
   }
 });

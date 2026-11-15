@@ -100,6 +100,8 @@ type Meta struct {
 	ID       string
 	Title    string
 	Uploader string
+	// Thumbnail is the site's thumbnail URL, empty when unknown.
+	Thumbnail string
 	// Duration is in seconds, 0 when unknown.
 	Duration float64
 }
@@ -172,6 +174,7 @@ func Args(req Request) []string {
 		"--print", "before_dl:ukai-meta id %(id)j",
 		"--print", "before_dl:ukai-meta title %(title)j",
 		"--print", "before_dl:ukai-meta uploader %(uploader)j",
+		"--print", "before_dl:ukai-meta thumbnail %(thumbnail)j",
 		"--print", "before_dl:ukai-meta duration %(duration)j",
 		"--print", "after_move:ukai-file %(filepath)j",
 		"--paths", req.OutDir,
@@ -350,6 +353,8 @@ func (p *parser) line(line string) {
 			p.meta.Title = jsonString(value)
 		case "uploader":
 			p.meta.Uploader = jsonString(value)
+		case "thumbnail":
+			p.meta.Thumbnail = jsonString(value)
 		case "duration":
 			p.meta.Duration = max(number(value), 0)
 			if p.h.Meta != nil {

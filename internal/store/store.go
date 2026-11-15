@@ -48,10 +48,14 @@ type Job struct {
 	VideoID  string `json:"video_id,omitempty"`
 	Title    string `json:"title,omitempty"`
 	Uploader string `json:"uploader,omitempty"`
+	// Thumbnail is the thumbnail URL yt-dlp reported, as given by the site.
+	Thumbnail string `json:"thumbnail,omitempty"`
 	// Duration is in seconds.
 	Duration float64 `json:"duration,omitempty"`
 	// Files are paths relative to the download directory.
-	Files      []string  `json:"files,omitempty"`
+	Files []string `json:"files,omitempty"`
+	// Size is the total size of Files in bytes when they were written.
+	Size       int64     `json:"size,omitempty"`
 	Error      string    `json:"error,omitempty"`
 	CreatedAt  time.Time `json:"created_at"`
 	StartedAt  time.Time `json:"started_at,omitzero"`

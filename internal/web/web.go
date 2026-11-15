@@ -1,5 +1,7 @@
-// Package web serves ukai's pages: a form to queue a download and the job
+// Package web serves ukai's pages: a form to queue downloads and the job
 // list, which refreshes itself with HTMX while anything is queued or running.
+// The list can be searched and filtered, finished jobs can be tried again or
+// removed, and downloaded files are served for playing or saving.
 package web
 
 import (
@@ -11,11 +13,17 @@ import (
 	"html/template"
 	"io/fs"
 	"log/slog"
+	"mime"
 	"net/http"
+	"net/url"
+	"os"
+	"path"
+	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/dor1a/ukai/internal/jobs"
 	"github.com/dor1a/ukai/internal/store"
@@ -32,6 +40,10 @@ var staticFS embed.FS
 type Jobs interface {
 	Submit(rawURL string, kind store.Kind, quality string) (store.Job, error)
 	Cancel(id string) error
+	Retry(id string) error
+	Remove(id string) error
+	ClearFinished() (int, error)
+	Get(id string) (jobs.View, bool)
 	List() []jobs.View
 	UnsavedSince() time.Time
 }
@@ -46,6 +58,10 @@ const (
 	probeTimeout = 90 * time.Second
 	// probeSlots is how many lookups run at once.
 	probeSlots = 2
+	// maxURLs is how many URLs one submission may queue.
+	maxURLs = 50
+	// maxSearch is the longest search text kept, in bytes.
+	maxSearch = 200
 )
 
 // Server renders the pages.
@@ -57,10 +73,13 @@ type Server struct {
 	log     *slog.Logger
 	version string
 	tpl     *template.Template
+	// files is the download directory, nil when files are not served.
+	files *os.Root
 }
 
-// New parses the templates. A nil prober turns the quality lookup off.
-func New(j Jobs, p Prober, log *slog.Logger, version string) (*Server, error) {
+// New parses the templates. A nil prober turns the quality lookup off, and an
+// empty downloadDir turns file serving off.
+func New(j Jobs, p Prober, downloadDir string, log *slog.Logger, version string) (*Server, error) {
 	if log == nil {
 		log = slog.New(slog.DiscardHandler)
 	}
@@ -70,7 +89,14 @@ func New(j Jobs, p Prober, log *slog.Logger, version string) (*Server, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Server{jobs: j, prober: p, slots: make(chan struct{}, probeSlots), probes: newProbes(probeMax, probeKeep), log: log, version: version, tpl: tpl}, nil
+	s := &Server{jobs: j, prober: p, slots: make(chan struct{}, probeSlots), probes: newProbes(probeMax, probeKeep), log: log, version: version, tpl: tpl}
+	if downloadDir != "" {
+		// os.Root keeps every open inside the directory, symlinks included.
+		if s.files, err = os.OpenRoot(downloadDir); err != nil {
+			return nil, err
+		}
+	}
+	return s, nil
 }
 
 // Handler returns the routes, guarded against cross-site form posts.
@@ -81,6 +107,10 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /jobs", s.list)
 	mux.HandleFunc("POST /jobs", s.submit)
 	mux.HandleFunc("POST /jobs/{id}/cancel", s.cancel)
+	mux.HandleFunc("POST /jobs/{id}/retry", s.retry)
+	mux.HandleFunc("POST /jobs/{id}/remove", s.remove)
+	mux.HandleFunc("POST /jobs/clear", s.clear)
+	mux.HandleFunc("GET /files/{id}/{n}", s.file)
 	mux.HandleFunc("POST /probe", s.probe)
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
@@ -93,7 +123,7 @@ func (s *Server) Handler() http.Handler {
 func securityHeaders(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		h := w.Header()
-		h.Set("Content-Security-Policy", "default-src 'self'; img-src 'self' data:; style-src 'self'; script-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'")
+		h.Set("Content-Security-Policy", "default-src 'self'; img-src 'self' data: https:; style-src 'self'; script-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'")
 		h.Set("X-Content-Type-Options", "nosniff")
 		h.Set("Referrer-Policy", "no-referrer")
 		next.ServeHTTP(w, r)
@@ -105,6 +135,13 @@ type listData struct {
 	Jobs   []row
 	Active bool
 	Error  string
+	// Filter is what the list is narrowed to, and Poll the address that
+	// refreshes it with the same filter.
+	Filter filter
+	Poll   string
+	// Total counts every job, Finished the ones that can be removed.
+	Total    int
+	Finished int
 	// Unsaved is when saving the job list started failing, empty while saved.
 	Unsaved string
 }
@@ -112,9 +149,19 @@ type listData struct {
 type pageData struct {
 	Version string
 	List    listData
+	Filter  filter
 	URL     string
+	// URLBox is URL as the "urlbox" template shows it.
+	URLBox  urlBox
 	Options optionsData
 	Error   string
+}
+
+// urlBox is the URL field. OOB marks it for an HTMX out-of-band swap, which
+// puts back the URLs a partly failed batch did not queue.
+type urlBox struct {
+	Value string
+	OOB   bool
 }
 
 // optionsData is what the "options" template shows: the kind and quality
@@ -195,6 +242,7 @@ func has(list []ytdlp.Option, value string) bool {
 // defaults: video at the best quality.
 func (s *Server) page(p pageData) pageData {
 	p.Version = s.version
+	p.URLBox = urlBox{Value: p.URL}
 	if p.Options.Kind == "" {
 		p.Options = options(formValues{Kind: string(store.KindVideo)}, nil)
 	}
@@ -203,36 +251,136 @@ func (s *Server) page(p pageData) pageData {
 
 // row is one job, formatted for display.
 type row struct {
-	ID        string
-	Title     string
-	URL       string
-	Kind      string
-	Quality   string
-	State     string
-	Percent   int // -1 when unknown or not running
-	Progress  string
-	Files     []string
+	ID      string
+	Title   string
+	URL     string
+	Kind    string
+	Quality string
+	State   string
+	// Thumbnail is an https image URL, or empty.
+	Thumbnail string
+	// Meta is the uploader, length and size, as far as they are known.
+	Meta     string
+	Percent  int // -1 when unknown or not running
+	Progress string
+	Files    []fileLink
+	// Media is "audio" or "video" when PlayURL can be played in the page.
+	Media     string
+	PlayURL   string
 	Error     string
 	When      string
 	CanCancel bool
+	CanRetry  bool
+	CanRemove bool
 }
 
-func (s *Server) listData(errMsg string) listData {
+// fileLink is one downloaded file. URL plays it in the browser and SaveURL
+// downloads it; both are empty when files are not served.
+type fileLink struct {
+	Name, URL, SaveURL string
+}
+
+// filter narrows the job list. Empty fields match everything.
+type filter struct {
+	Q     string
+	Show  string // video or audio
+	State string // active, done or failed (which includes canceled)
+	Order string // oldest, or empty for newest first
+}
+
+func readFilter(r *http.Request) filter {
+	f := filter{
+		Q:     strings.TrimSpace(r.FormValue("q")),
+		Show:  r.FormValue("show"),
+		State: r.FormValue("state"),
+		Order: r.FormValue("order"),
+	}
+	for len(f.Q) > maxSearch || !utf8.ValidString(f.Q) {
+		_, size := utf8.DecodeLastRuneInString(f.Q)
+		f.Q = f.Q[:len(f.Q)-size]
+	}
+	if f.Show != "video" && f.Show != "audio" {
+		f.Show = ""
+	}
+	if f.State != "active" && f.State != "done" && f.State != "failed" {
+		f.State = ""
+	}
+	if f.Order != "oldest" {
+		f.Order = ""
+	}
+	return f
+}
+
+// Set reports whether f narrows the list at all.
+func (f filter) Set() bool { return f.Q != "" || f.Show != "" || f.State != "" }
+
+// query is f as URL query parameters.
+func (f filter) query() string {
+	v := url.Values{}
+	for k, s := range map[string]string{"q": f.Q, "show": f.Show, "state": f.State, "order": f.Order} {
+		if s != "" {
+			v.Set(k, s)
+		}
+	}
+	return v.Encode()
+}
+
+func (f filter) match(v jobs.View) bool {
+	if f.Show != "" && string(v.Kind) != f.Show {
+		return false
+	}
+	switch f.State {
+	case "active":
+		if !v.Active() {
+			return false
+		}
+	case "done":
+		if v.State != store.Done {
+			return false
+		}
+	case "failed":
+		if v.State != store.Failed && v.State != store.Canceled {
+			return false
+		}
+	}
+	if f.Q == "" {
+		return true
+	}
+	q := strings.ToLower(f.Q)
+	for _, s := range []string{v.Title, v.Uploader, v.URL} {
+		if strings.Contains(strings.ToLower(s), q) {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *Server) listData(f filter, errMsg string) listData {
 	views := s.jobs.List()
-	d := listData{Jobs: make([]row, 0, len(views)), Error: errMsg}
+	d := listData{Jobs: make([]row, 0, len(views)), Error: errMsg, Filter: f, Poll: "/jobs", Total: len(views)}
+	if q := f.query(); q != "" {
+		d.Poll += "?" + q
+	}
 	if t := s.jobs.UnsavedSince(); !t.IsZero() {
 		d.Unsaved = t.Local().Format("2006-01-02 15:04")
 	}
 	for _, v := range views {
-		d.Jobs = append(d.Jobs, toRow(v))
 		if v.Active() {
 			d.Active = true
+		} else {
+			d.Finished++
 		}
+		if f.match(v) {
+			d.Jobs = append(d.Jobs, s.toRow(v))
+		}
+	}
+	if f.Order == "oldest" {
+		slices.Reverse(d.Jobs)
 	}
 	return d
 }
 
-func toRow(v jobs.View) row {
+func (s *Server) toRow(v jobs.View) row {
 	r := row{
 		ID:        v.ID,
 		Title:     v.Title,
@@ -240,11 +388,25 @@ func toRow(v jobs.View) row {
 		Kind:      label(string(v.Kind)),
 		Quality:   ytdlp.QualityLabel(v.Kind == store.KindAudio, cmpOr(v.Quality, "best")),
 		State:     label(string(v.State)),
+		Thumbnail: httpsURL(v.Thumbnail),
+		Meta:      metaText(v),
 		Percent:   -1,
-		Files:     v.Files,
 		Error:     v.Error,
 		When:      v.CreatedAt.Local().Format("2006-01-02 15:04"),
 		CanCancel: v.Active(),
+		CanRetry:  v.State == store.Failed || v.State == store.Canceled,
+		CanRemove: !v.Active(),
+	}
+	for i, name := range v.Files {
+		l := fileLink{Name: name}
+		if s.files != nil {
+			l.URL = "/files/" + url.PathEscape(v.ID) + "/" + strconv.Itoa(i)
+			l.SaveURL = l.URL + "?dl=1"
+		}
+		r.Files = append(r.Files, l)
+	}
+	if v.State == store.Done && len(r.Files) > 0 && r.Files[0].URL != "" {
+		r.Media, r.PlayURL = string(v.Kind), r.Files[0].URL
 	}
 	if r.Title == "" {
 		r.Title = v.URL
@@ -256,6 +418,31 @@ func toRow(v jobs.View) row {
 		r.Progress = progressText(*v.Live)
 	}
 	return r
+}
+
+// httpsURL returns raw if it is an https URL with a host, otherwise "".
+func httpsURL(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil || u.Scheme != "https" || u.Host == "" {
+		return ""
+	}
+	return u.String()
+}
+
+// metaText joins what is known of the uploader, length and size, e.g.
+// "Some Channel · 3:42 · 5.0 MiB".
+func metaText(v jobs.View) string {
+	var parts []string
+	if v.Uploader != "" {
+		parts = append(parts, v.Uploader)
+	}
+	if v.Duration > 0 {
+		parts = append(parts, clock(v.Duration))
+	}
+	if v.Size > 0 {
+		parts = append(parts, size(v.Size))
+	}
+	return strings.Join(parts, " · ")
 }
 
 func cmpOr(s, def string) string {
@@ -320,37 +507,89 @@ func clock(seconds float64) string {
 func isHTMX(r *http.Request) bool { return r.Header.Get("HX-Request") == "true" }
 
 func (s *Server) index(w http.ResponseWriter, r *http.Request) {
-	s.render(w, http.StatusOK, "index", s.page(pageData{List: s.listData("")}))
+	f := readFilter(r)
+	s.render(w, http.StatusOK, "index", s.page(pageData{List: s.listData(f, ""), Filter: f}))
 }
 
 func (s *Server) list(w http.ResponseWriter, r *http.Request) {
-	s.render(w, http.StatusOK, "jobs", s.listData(""))
+	s.render(w, http.StatusOK, "jobs", s.listData(readFilter(r), ""))
+}
+
+// splitURLs returns the non-empty lines of raw, trimmed.
+func splitURLs(raw string) []string {
+	var out []string
+	for _, line := range strings.Split(raw, "\n") {
+		if line = strings.TrimSpace(line); line != "" {
+			out = append(out, line)
+		}
+	}
+	return out
+}
+
+// queue checks every URL first and queues them only when all are valid. It
+// returns how many were queued, a message for the page (empty on success),
+// and the URLs left unqueued when a submission failed partway.
+func (s *Server) queue(f formValues, kind store.Kind, quality string) (int, string, string) {
+	urls := splitURLs(f.URL)
+	switch {
+	case len(urls) == 0:
+		return 0, s.userMessage(jobs.ErrBadURL), ""
+	case len(urls) > maxURLs:
+		return 0, fmt.Sprintf("Enter at most %d URLs at a time.", maxURLs), ""
+	case len(urls) > 1 && kind == store.KindAudio && strings.HasPrefix(quality, "fmt-"):
+		return 0, "An original format belongs to one video. With several URLs, choose Best or an MP3 bitrate.", ""
+	}
+	if len(urls) == 1 && kind == store.KindAudio && strings.HasPrefix(quality, "fmt-") {
+		if msg := s.formatMessage(f, quality); msg != "" {
+			return 0, msg, ""
+		}
+	}
+	for i, u := range urls {
+		if _, err := jobs.CheckURL(u); err != nil {
+			if len(urls) == 1 {
+				return 0, s.userMessage(err), ""
+			}
+			return 0, fmt.Sprintf("Line %d: %s", i+1, s.userMessage(err)), ""
+		}
+	}
+	for i, u := range urls {
+		if _, err := s.jobs.Submit(u, kind, quality); err != nil {
+			msg := s.userMessage(err)
+			if i == 0 {
+				return 0, msg, ""
+			}
+			return i, fmt.Sprintf("Queued %d of %d URLs, then: %s The URLs left are still in the box.", i, len(urls), msg), strings.Join(urls[i:], "\n")
+		}
+	}
+	return len(urls), "", ""
 }
 
 func (s *Server) submit(w http.ResponseWriter, r *http.Request) {
-	r.Body = http.MaxBytesReader(w, r.Body, 16<<10)
+	r.Body = http.MaxBytesReader(w, r.Body, 128<<10)
 	if err := r.ParseForm(); err != nil {
 		http.Error(w, "bad form", http.StatusBadRequest)
 		return
 	}
 	f := readForm(r)
+	lf := readFilter(r)
 	kind := store.Kind(f.Kind)
 	quality := f.VideoQuality
 	if kind == store.KindAudio {
 		quality = f.AudioQuality
 	}
-	var msg string
-	if kind == store.KindAudio && strings.HasPrefix(quality, "fmt-") {
-		msg = s.formatMessage(f, quality)
-	}
-	if msg == "" {
-		_, err := s.jobs.Submit(f.URL, kind, quality)
-		msg = s.userMessage(err)
-	}
+	queued, msg, rest := s.queue(f, kind, quality)
 	switch {
-	case isHTMX(r) && msg != "":
+	case isHTMX(r) && msg != "" && queued == 0:
 		w.Header().Set("X-Ukai-Error", "1")
-		s.render(w, http.StatusOK, "jobs", s.listData(msg))
+		s.render(w, http.StatusOK, "jobs", s.listData(lf, msg))
+	case isHTMX(r) && msg != "":
+		// Part of the batch was queued: keep the choices, and leave only the
+		// URLs that were not queued in the box.
+		w.Header().Set("X-Ukai-Error", "1")
+		s.render(w, http.StatusOK, "partial", struct {
+			List listData
+			Box  urlBox
+		}{s.listData(lf, msg), urlBox{Value: rest, OOB: true}})
 	case isHTMX(r):
 		// Queued: put the choices back to the defaults for the next URL, and
 		// keep the kind.
@@ -359,12 +598,24 @@ func (s *Server) submit(w http.ResponseWriter, r *http.Request) {
 		s.render(w, http.StatusOK, "submitted", struct {
 			List    listData
 			Options optionsData
-		}{s.listData(""), o})
+		}{s.listData(lf, msg), o})
 	case msg != "":
-		s.render(w, http.StatusBadRequest, "index", s.page(pageData{List: s.listData(""), URL: f.URL, Options: options(f, nil), Error: msg}))
+		box := f.URL
+		if queued > 0 {
+			box = rest
+		}
+		s.render(w, http.StatusBadRequest, "index", s.page(pageData{List: s.listData(lf, ""), Filter: lf, URL: box, Options: options(f, nil), Error: msg}))
 	default:
-		http.Redirect(w, r, "/", http.StatusSeeOther)
+		http.Redirect(w, r, home(lf), http.StatusSeeOther)
 	}
+}
+
+// home is the page address that shows the list with filter f.
+func home(f filter) string {
+	if q := f.query(); q != "" {
+		return "/?" + q
+	}
+	return "/"
 }
 
 // formatMessage says why the original format q cannot be downloaded from
@@ -406,7 +657,9 @@ func (s *Server) probe(w http.ResponseWriter, r *http.Request) {
 	f := readForm(r)
 	f.ProbedURL = ""
 	o := options(f, nil)
-	if u, err := jobs.CheckURL(f.URL); err != nil {
+	if len(splitURLs(f.URL)) > 1 {
+		o.Error = "Show qualities works on one URL at a time."
+	} else if u, err := jobs.CheckURL(f.URL); err != nil {
 		o.Error = label(err.Error()) + "."
 	} else if found, err := s.lookup(r.Context(), u); err != nil {
 		o.Error = s.probeMessage(err)
@@ -430,7 +683,8 @@ func (s *Server) probe(w http.ResponseWriter, r *http.Request) {
 	if o.Error != "" {
 		status = http.StatusBadRequest
 	}
-	s.render(w, status, "index", s.page(pageData{List: s.listData(""), URL: f.URL, Options: o}))
+	lf := readFilter(r)
+	s.render(w, status, "index", s.page(pageData{List: s.listData(lf, ""), Filter: lf, URL: f.URL, Options: o}))
 }
 
 // lookup runs the prober within probeTimeout and probeSlots.
@@ -469,18 +723,101 @@ func (s *Server) probeMessage(err error) string {
 }
 
 func (s *Server) cancel(w http.ResponseWriter, r *http.Request) {
-	err := s.jobs.Cancel(r.PathValue("id"))
+	s.act(w, r, func() error { return s.jobs.Cancel(r.PathValue("id")) })
+}
+
+func (s *Server) retry(w http.ResponseWriter, r *http.Request) {
+	s.act(w, r, func() error { return s.jobs.Retry(r.PathValue("id")) })
+}
+
+func (s *Server) remove(w http.ResponseWriter, r *http.Request) {
+	s.act(w, r, func() error { return s.jobs.Remove(r.PathValue("id")) })
+}
+
+func (s *Server) clear(w http.ResponseWriter, r *http.Request) {
+	s.act(w, r, func() error {
+		_, err := s.jobs.ClearFinished()
+		return err
+	})
+}
+
+// act runs one job action from a posted button and shows the list again,
+// keeping the filter the page posted along.
+func (s *Server) act(w http.ResponseWriter, r *http.Request, do func() error) {
+	r.Body = http.MaxBytesReader(w, r.Body, 16<<10)
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "bad form", http.StatusBadRequest)
+		return
+	}
+	f := readFilter(r)
+	err := do()
 	msg := s.userMessage(err)
 	switch {
 	case isHTMX(r):
-		s.render(w, http.StatusOK, "jobs", s.listData(msg))
+		s.render(w, http.StatusOK, "jobs", s.listData(f, msg))
 	case errors.Is(err, jobs.ErrNotFound):
-		s.render(w, http.StatusNotFound, "index", s.page(pageData{List: s.listData(""), Error: msg}))
+		s.render(w, http.StatusNotFound, "index", s.page(pageData{List: s.listData(f, ""), Filter: f, Error: msg}))
 	case msg != "":
-		s.render(w, http.StatusConflict, "index", s.page(pageData{List: s.listData(""), Error: msg}))
+		s.render(w, http.StatusConflict, "index", s.page(pageData{List: s.listData(f, ""), Filter: f, Error: msg}))
 	default:
-		http.Redirect(w, r, "/", http.StatusSeeOther)
+		http.Redirect(w, r, home(f), http.StatusSeeOther)
 	}
+}
+
+// mediaTypes are the types of the files yt-dlp writes, so the browser can
+// play them whatever the container's MIME table knows.
+var mediaTypes = map[string]string{
+	".mp3":  "audio/mpeg",
+	".m4a":  "audio/mp4",
+	".opus": "audio/ogg",
+	".ogg":  "audio/ogg",
+	".flac": "audio/flac",
+	".wav":  "audio/wav",
+	".mp4":  "video/mp4",
+	".webm": "video/webm",
+	".mkv":  "video/x-matroska",
+}
+
+// file serves one file a job wrote, by its position in the job's list, so a
+// request can only reach files ukai itself recorded. Range requests work, and
+// ?dl=1 asks the browser to save it.
+func (s *Server) file(w http.ResponseWriter, r *http.Request) {
+	if s.files == nil {
+		http.NotFound(w, r)
+		return
+	}
+	v, ok := s.jobs.Get(r.PathValue("id"))
+	n, err := strconv.Atoi(r.PathValue("n"))
+	if !ok || err != nil || n < 0 || n >= len(v.Files) {
+		http.NotFound(w, r)
+		return
+	}
+	name := v.Files[n]
+	f, err := s.files.Open(filepath.FromSlash(name))
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil || !info.Mode().IsRegular() {
+		http.NotFound(w, r)
+		return
+	}
+	base := path.Base(name)
+	if t := mediaTypes[strings.ToLower(path.Ext(base))]; t != "" {
+		w.Header().Set("Content-Type", t)
+	}
+	disposition := "inline"
+	if r.URL.Query().Get("dl") == "1" {
+		disposition = "attachment"
+	}
+	if d := mime.FormatMediaType(disposition, map[string]string{"filename": base}); d != "" {
+		w.Header().Set("Content-Disposition", d)
+	} else {
+		w.Header().Set("Content-Disposition", disposition)
+	}
+	http.ServeContent(w, r, base, info.ModTime(), f)
 }
 
 // userMessage turns an error into text for the page. Errors the user cannot
@@ -490,7 +827,8 @@ func (s *Server) userMessage(err error) string {
 	case err == nil:
 		return ""
 	case errors.Is(err, jobs.ErrBadURL), errors.Is(err, jobs.ErrBadKind), errors.Is(err, jobs.ErrBadQuality),
-		errors.Is(err, jobs.ErrNotFound), errors.Is(err, jobs.ErrNotActive):
+		errors.Is(err, jobs.ErrNotFound), errors.Is(err, jobs.ErrNotActive),
+		errors.Is(err, jobs.ErrActive), errors.Is(err, jobs.ErrNoRetry):
 		return label(err.Error()) + "."
 	case errors.Is(err, jobs.ErrSave):
 		return label(err.Error()) + ". See the ukai log."

@@ -1,31 +1,69 @@
 {{define "jobs" -}}
-<section id="jobs" aria-live="polite"{{if or .Active .Unsaved}} hx-get="/jobs" hx-trigger="every 2s" hx-swap="outerHTML"{{end}}>
+<section id="jobs" aria-live="polite" hx-sync="this:drop"{{if or .Active .Unsaved}} hx-get="{{.Poll}}" hx-trigger="every 2s" hx-swap="outerHTML"{{end}}>
   {{with .Unsaved}}<p class="error" role="alert">ukai cannot save the job list to disk (failing since {{.}}) and keeps trying. Until a save works, a restart would lose the changes since then: jobs that finished or were canceled would be queued and run again. See the ukai log.</p>{{end}}
   {{with .Error}}<p class="error" role="alert">{{.}}</p>{{end}}
-  {{if not .Jobs}}<p class="empty">No downloads yet.</p>{{end}}
+  <div class="list-head">
+    <span class="count">{{if .Filter.Set}}{{len .Jobs}} of {{.Total}}{{else}}{{.Total}}{{end}} downloads</span>
+    {{if .Finished}}
+    <form method="post" action="/jobs/clear" hx-post="/jobs/clear" hx-target="#jobs" hx-swap="outerHTML" hx-sync="#jobs:replace" hx-confirm="Remove every finished job from the list? The downloaded files stay.">
+      {{template "filterfields" .Filter}}
+      <button type="submit" class="secondary">Clear finished</button>
+    </form>
+    {{end}}
+  </div>
+  {{if not .Jobs}}<p class="empty">{{if .Filter.Set}}No downloads match.{{else}}No downloads yet.{{end}}</p>{{end}}
   <ol class="jobs">
   {{range .Jobs}}
     <li class="job state-{{.State}}">
-      <div class="head">
-        <a class="title" href="{{.URL}}" rel="noopener noreferrer" target="_blank">{{.Title}}</a>
-        <span class="badge">{{.Kind}}</span>
-        <span class="badge">{{.Quality}}</span>
-        <span class="badge state">{{.State}}</span>
-      </div>
-      {{if ge .Percent 0}}<progress max="100" value="{{.Percent}}">{{.Percent}}%</progress>{{end}}
-      {{with .Progress}}<p class="progress">{{.}}</p>{{end}}
-      {{with .Error}}<p class="job-error">{{.}}</p>{{end}}
-      {{with .Files}}<ul class="files">{{range .}}<li>{{.}}</li>{{end}}</ul>{{end}}
-      <div class="foot">
-        <time>{{.When}}</time>
-        {{if .CanCancel}}
-        <form method="post" action="/jobs/{{.ID}}/cancel" hx-post="/jobs/{{.ID}}/cancel" hx-target="#jobs" hx-swap="outerHTML">
-          <button type="submit" class="secondary">Cancel</button>
-        </form>
+      <div class="thumb">{{if .Thumbnail}}<img src="{{.Thumbnail}}" alt="" loading="lazy" width="96" height="54">{{else}}<span>{{.Kind}}</span>{{end}}</div>
+      <div class="body">
+        <div class="head">
+          <a class="title" href="{{.URL}}" rel="noopener noreferrer" target="_blank">{{.Title}}</a>
+          <span class="badge">{{.Kind}}</span>
+          <span class="badge">{{.Quality}}</span>
+          <span class="badge state">{{.State}}</span>
+        </div>
+        {{with .Meta}}<p class="meta">{{.}}</p>{{end}}
+        {{if ge .Percent 0}}<progress max="100" value="{{.Percent}}">{{.Percent}}%</progress>{{end}}
+        {{with .Progress}}<p class="progress">{{.}}</p>{{end}}
+        {{with .Error}}<p class="job-error">{{.}}</p>{{end}}
+        {{if .PlayURL}}
+        <details class="play" id="play-{{.ID}}" hx-preserve="true">
+          <summary>Play</summary>
+          {{if eq .Media "audio"}}<audio controls preload="none" src="{{.PlayURL}}"></audio>{{else}}<video controls preload="none" src="{{.PlayURL}}"></video>{{end}}
+        </details>
         {{end}}
+        {{with .Files}}<ul class="files">{{range .}}<li>{{if .SaveURL}}<a href="{{.SaveURL}}">{{.Name}}</a>{{else}}{{.Name}}{{end}}</li>{{end}}</ul>{{end}}
+        <div class="foot">
+          <time>{{.When}}</time>
+          <div class="actions">
+            {{if .CanCancel}}
+            <form method="post" action="/jobs/{{.ID}}/cancel" hx-post="/jobs/{{.ID}}/cancel" hx-target="#jobs" hx-swap="outerHTML" hx-sync="#jobs:replace">
+              {{template "filterfields" $.Filter}}
+              <button type="submit" class="secondary">Cancel</button>
+            </form>
+            {{end}}
+            {{if .CanRetry}}
+            <form method="post" action="/jobs/{{.ID}}/retry" hx-post="/jobs/{{.ID}}/retry" hx-target="#jobs" hx-swap="outerHTML" hx-sync="#jobs:replace">
+              {{template "filterfields" $.Filter}}
+              <button type="submit" class="secondary">Retry</button>
+            </form>
+            {{end}}
+            {{if .CanRemove}}
+            <form method="post" action="/jobs/{{.ID}}/remove" hx-post="/jobs/{{.ID}}/remove" hx-target="#jobs" hx-swap="outerHTML" hx-sync="#jobs:replace">
+              {{template "filterfields" $.Filter}}
+              <button type="submit" class="secondary">Remove</button>
+            </form>
+            {{end}}
+          </div>
+        </div>
       </div>
     </li>
   {{end}}
   </ol>
 </section>
+{{- end}}
+
+{{define "filterfields" -}}
+{{with .Q}}<input type="hidden" name="q" value="{{.}}">{{end}}{{with .Show}}<input type="hidden" name="show" value="{{.}}">{{end}}{{with .State}}<input type="hidden" name="state" value="{{.}}">{{end}}{{with .Order}}<input type="hidden" name="order" value="{{.}}">{{end}}
 {{- end}}

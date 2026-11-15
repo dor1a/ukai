@@ -11,7 +11,8 @@
 // memory stays the truth: Run saves the whole list again every few seconds
 // and UnsavedSince reports the failure until a save works.
 //
-// Each job logs one line when it is queued, starts, ends, or is queued again.
+// Each job logs one line when it is queued, starts, ends, is queued again, or
+// is removed from the list.
 package jobs
 
 import (
@@ -81,7 +82,7 @@ type View struct {
 	Live *Live
 }
 
-// Errors returned by Submit and Cancel.
+// Errors returned by Submit, Cancel, Retry and Remove.
 var (
 	ErrBadURL     = errors.New("enter a URL that starts with http:// or https://")
 	ErrBadKind    = errors.New("choose video or audio")
@@ -89,6 +90,8 @@ var (
 	ErrSave       = errors.New("the job list could not be saved")
 	ErrNotFound   = errors.New("no such job")
 	ErrNotActive  = errors.New("the job has already finished")
+	ErrActive     = errors.New("the job is still queued or running; cancel it first")
+	ErrNoRetry    = errors.New("only a failed or canceled job can be tried again")
 )
 
 const maxURLLength = 2048
@@ -306,21 +309,116 @@ func (m *Manager) Cancel(id string) error {
 	return nil
 }
 
+// Retry queues a failed or canceled job again with the same URL, kind and
+// quality. It moves to the top of the list as a new request.
+func (m *Manager) Retry(id string) error {
+	m.mu.Lock()
+	j := m.findLocked(id)
+	if j == nil {
+		m.mu.Unlock()
+		return ErrNotFound
+	}
+	if j.State != store.Failed && j.State != store.Canceled {
+		m.mu.Unlock()
+		return ErrNoRetry
+	}
+	prev, prevJobs, prevPending := *j, slices.Clone(m.jobs), slices.Clone(m.pending)
+	was := j.State
+	j.State = store.Queued
+	j.CreatedAt = m.now()
+	j.StartedAt, j.FinishedAt = time.Time{}, time.Time{}
+	j.Error, j.Files, j.Size = "", nil, 0
+	m.jobs = slices.DeleteFunc(m.jobs, func(x *store.Job) bool { return x == j })
+	m.jobs = append([]*store.Job{j}, m.jobs...)
+	m.pending = append(m.pending, id)
+	if err := m.saveLocked(); err != nil {
+		*j = prev
+		m.jobs, m.pending = prevJobs, prevPending
+		m.mu.Unlock()
+		m.log.Error("cannot save jobs", "err", err)
+		return ErrSave
+	}
+	m.log.Info("job requeued", "job", id, "url", j.URL, "kind", j.Kind, "quality", j.Quality, "reason", "retry", "was", was)
+	m.mu.Unlock()
+	select {
+	case m.wake <- struct{}{}:
+	default:
+	}
+	return nil
+}
+
+// Remove takes a finished job off the list. Its files stay where they are.
+func (m *Manager) Remove(id string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	j := m.findLocked(id)
+	switch {
+	case j == nil:
+		return ErrNotFound
+	case j.Active():
+		return ErrActive
+	}
+	prevJobs := slices.Clone(m.jobs)
+	m.jobs = slices.DeleteFunc(m.jobs, func(x *store.Job) bool { return x == j })
+	if err := m.saveLocked(); err != nil {
+		m.jobs = prevJobs
+		m.log.Error("cannot save jobs", "err", err)
+		return ErrSave
+	}
+	m.log.Info("job removed", "job", id, "url", j.URL, "was", j.State)
+	return nil
+}
+
+// ClearFinished takes every finished job off the list and returns how many.
+// Their files stay where they are.
+func (m *Manager) ClearFinished() (int, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	prevJobs := slices.Clone(m.jobs)
+	m.jobs = slices.DeleteFunc(m.jobs, func(x *store.Job) bool { return !x.Active() })
+	n := len(prevJobs) - len(m.jobs)
+	if n == 0 {
+		return 0, nil
+	}
+	if err := m.saveLocked(); err != nil {
+		m.jobs = prevJobs
+		m.log.Error("cannot save jobs", "err", err)
+		return 0, ErrSave
+	}
+	m.log.Info("finished jobs removed", "count", n)
+	return n, nil
+}
+
+// Get returns a copy of one job.
+func (m *Manager) Get(id string) (View, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	j := m.findLocked(id)
+	if j == nil {
+		return View{}, false
+	}
+	return m.viewLocked(j), true
+}
+
 // List returns copies of all jobs, newest first.
 func (m *Manager) List() []View {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	out := make([]View, len(m.jobs))
 	for i, j := range m.jobs {
-		v := View{Job: *j}
-		v.Files = slices.Clone(j.Files)
-		if l := m.live[j.ID]; l != nil {
-			c := *l
-			v.Live = &c
-		}
-		out[i] = v
+		out[i] = m.viewLocked(j)
 	}
 	return out
+}
+
+func (m *Manager) viewLocked(j *store.Job) View {
+	v := View{Job: *j}
+	v.Files = slices.Clone(j.Files)
+	if l := m.live[j.ID]; l != nil {
+		c := *l
+		v.Live = &c
+	}
+	return v
 }
 
 // UnsavedSince returns when saving a change first failed, or the zero time
@@ -409,6 +507,7 @@ func (m *Manager) take(ctx context.Context) (string, context.Context, context.Ca
 		j.StartedAt = m.now()
 		j.Error = ""
 		j.Files = nil
+		j.Size = 0
 		m.live[id] = &Live{Total: -1, Speed: -1, ETA: -1}
 		jctx, cancel := context.WithCancel(ctx)
 		m.cancels[id] = cancel
@@ -434,6 +533,7 @@ func (m *Manager) run(ctx, jctx context.Context, cancel context.CancelFunc, id s
 			Meta: func(md ytdlp.Meta) {
 				m.update(id, func(j *store.Job) {
 					j.VideoID, j.Title, j.Uploader, j.Duration = md.ID, md.Title, md.Uploader, md.Duration
+					j.Thumbnail = md.Thumbnail
 				})
 			},
 			Progress: func(p ytdlp.Progress) {
@@ -444,7 +544,14 @@ func (m *Manager) run(ctx, jctx context.Context, cancel context.CancelFunc, id s
 				m.mu.Unlock()
 			},
 			File: func(path string) {
-				m.update(id, func(j *store.Job) { j.Files = append(j.Files, m.relative(path)) })
+				var n int64
+				if info, err := os.Stat(path); err == nil {
+					n = info.Size()
+				}
+				m.update(id, func(j *store.Job) {
+					j.Files = append(j.Files, m.relative(path))
+					j.Size += n
+				})
 			},
 		})
 	}

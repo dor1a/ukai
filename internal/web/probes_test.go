@@ -81,7 +81,7 @@ func TestChoicesWithoutALookup(t *testing.T) {
 
 func TestSubmitRefusesAnExpiredLookup(t *testing.T) {
 	j := &stubJobs{}
-	s, err := New(j, &stubProber{formats: found}, nil, "test")
+	s, err := New(j, &stubProber{formats: found}, "", nil, "test")
 	if err != nil {
 		t.Fatal(err)
 	}

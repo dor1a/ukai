@@ -30,12 +30,20 @@ type stubJobs struct {
 	submitErr error
 	cancelErr error
 	unsaved   time.Time
+	retried   []string
+	removed   []string
+	cleared   int
+	actErr    error
+	failAt    int
+	calls     int
 }
 
 func (s *stubJobs) Submit(u string, k store.Kind, q string) (store.Job, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.submitErr != nil {
+	s.calls++
+	// failAt fails only that call (1-based); otherwise submitErr fails every call.
+	if s.submitErr != nil && (s.failAt == 0 || s.calls == s.failAt) {
 		return store.Job{}, s.submitErr
 	}
 	s.submitted = append(s.submitted, submission{u, k, q})
@@ -47,6 +55,38 @@ func (s *stubJobs) Cancel(id string) error {
 	defer s.mu.Unlock()
 	s.canceled = append(s.canceled, id)
 	return s.cancelErr
+}
+
+func (s *stubJobs) Retry(id string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.retried = append(s.retried, id)
+	return s.actErr
+}
+
+func (s *stubJobs) Remove(id string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.removed = append(s.removed, id)
+	return s.actErr
+}
+
+func (s *stubJobs) ClearFinished() (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.cleared++
+	return 0, s.actErr
+}
+
+func (s *stubJobs) Get(id string) (jobs.View, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, v := range s.views {
+		if v.ID == id {
+			return v, true
+		}
+	}
+	return jobs.View{}, false
 }
 
 func (s *stubJobs) List() []jobs.View {
@@ -82,7 +122,7 @@ func server(t *testing.T, j *stubJobs) http.Handler {
 
 func serverWith(t *testing.T, j *stubJobs, p Prober) http.Handler {
 	t.Helper()
-	s, err := New(j, p, nil, "test")
+	s, err := New(j, p, "", nil, "test")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -116,7 +156,7 @@ func TestIndex(t *testing.T) {
 		t.Fatalf("status %d", rec.Code)
 	}
 	b := rec.Body.String()
-	for _, want := range []string{`<form class="submit"`, `name="url"`, `value="audio"`, "No downloads yet.", `/static/htmx.min.js?v=test`,
+	for _, want := range []string{`<form class="submit"`, `name="url"`, `value="audio"`, "No downloads yet.", `/static/htmx.min.js?v=test`, `<script src="/static/mode.js?v=test"></script>`, `id="mode-toggle"`,
 		`formaction="/probe"`, `id="options"`, `name="probed_url" value=""`,
 		`<option value="best" selected>Best</option>`, `<option value="best" selected>Best (original)</option>`,
 		`<option value="mp3-320">MP3 320 kbps</option>`, `<option value="mp3-128">MP3 128 kbps</option>`} {
@@ -127,7 +167,7 @@ func TestIndex(t *testing.T) {
 	if strings.Contains(b, `label="Up to"`) || strings.Contains(b, `label="Original format"`) {
 		t.Error("page lists looked-up qualities before a lookup")
 	}
-	if strings.Contains(b, "hx-trigger") {
+	if strings.Contains(b, `hx-trigger="every 2s"`) {
 		t.Error("page polls with no active jobs")
 	}
 	if csp := rec.Header().Get("Content-Security-Policy"); !strings.Contains(csp, "script-src 'self'") {
@@ -330,7 +370,7 @@ func TestProbeCrossSiteIsRejected(t *testing.T) {
 }
 
 func TestLookupWaitsForASlot(t *testing.T) {
-	s, err := New(&stubJobs{}, &stubProber{formats: found}, nil, "test")
+	s, err := New(&stubJobs{}, &stubProber{formats: found}, "", nil, "test")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -375,7 +415,7 @@ func TestSubmitErrors(t *testing.T) {
 
 	rec = do(h, "POST", "/jobs", url.Values{"url": {"nope"}, "kind": {"audio"}}, nil)
 	b := rec.Body.String()
-	if rec.Code != 400 || !strings.Contains(b, `value="nope"`) || !strings.Contains(b, `value="audio" checked`) {
+	if rec.Code != 400 || !strings.Contains(b, `>nope</textarea>`) || !strings.Contains(b, `value="audio" checked`) {
 		t.Fatalf("form: status %d\n%s", rec.Code, b)
 	}
 }

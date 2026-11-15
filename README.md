@@ -20,9 +20,12 @@ Paste a URL, pick video or audio, and the file lands in one directory.
 
 ## What it does
 
-- Downloads one URL as video or audio. Video defaults to the best quality. Audio defaults to the best original stream, kept as it is without re-encoding.
+- Downloads a URL as video or audio, or several at once with one URL per line (up to 50). Video defaults to the best quality. Audio defaults to the best original stream, kept as it is without re-encoding.
 - **Show qualities** asks yt-dlp what the URL offers and lists every resolution and every original audio format. A resolution is a cap: yt-dlp takes the largest at or below it. MP3 at 320, 256, 192 or 128 kbps is always on the list.
-- Runs downloads in a queue (`UKAI_CONCURRENCY` at a time). Queued and running jobs can be canceled. The page shows progress while anything is active.
+- Runs downloads in a queue (`UKAI_CONCURRENCY` at a time). Queued and running jobs can be canceled, and failed or canceled ones tried again with the same settings. The page shows progress while anything is active.
+- Lists jobs one per row with the site's thumbnail, uploader, length and size. The list can be searched by title, uploader or URL, narrowed to video or audio and by state, and sorted oldest first.
+- Plays a finished download in the page and links each file for saving. Only files a job recorded are served, by their place in that job, from inside the download directory.
+- Removes finished jobs from the list one at a time or all at once. The downloaded files stay where they are.
 - Names each file after the title, video ID and quality, so two qualities of one video never share a file: `Title [id] 1920x1080.webm`, `Title [id] 251.opus`, `Title [id] 320k.mp3`.
 - Keeps the job history in `jobs.json` in the data directory.
 
