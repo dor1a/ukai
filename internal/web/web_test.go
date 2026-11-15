@@ -487,3 +487,16 @@ func TestProgressText(t *testing.T) {
 		}
 	}
 }
+
+func TestFooterLinksTheSource(t *testing.T) {
+	for _, target := range []string{"/", "/subs"} {
+		h := server(t, &stubJobs{})
+		if target == "/subs" {
+			h = subsServer(t, sampleSubs())
+		}
+		b := do(h, "GET", target, nil, nil).Body.String()
+		if !strings.Contains(b, `<span>ukai test</span><a href="https://github.com/dor1a/ukai" rel="noopener" title="Source on GitHub"`) {
+			t.Errorf("%s: footer lacks the GitHub link", target)
+		}
+	}
+}
