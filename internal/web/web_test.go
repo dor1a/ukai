@@ -156,7 +156,7 @@ func TestIndex(t *testing.T) {
 		t.Fatalf("status %d", rec.Code)
 	}
 	b := rec.Body.String()
-	for _, want := range []string{`<form class="submit"`, `name="url"`, `value="audio"`, "No downloads yet.", `/static/htmx.min.js?v=test`, `<script src="/static/mode.js?v=test"></script>`, `id="mode-toggle"`,
+	for _, want := range []string{`<form class="card compose submit"`, `name="url"`, `value="audio"`, "No downloads yet.", `/static/htmx.min.js?v=test`, `<script src="/static/mode.js?v=test"></script>`, `id="mode-toggle"`,
 		`formaction="/probe"`, `id="options"`, `name="probed_url" value=""`,
 		`<option value="best" selected>Best</option>`, `<option value="best" selected>Best (original)</option>`,
 		`<option value="mp3-320">MP3 320 kbps</option>`, `<option value="mp3-128">MP3 128 kbps</option>`} {
@@ -240,7 +240,7 @@ func TestSubmitHTMX(t *testing.T) {
 		t.Error("response is not the job list")
 	}
 	// The choices go back to the defaults for the next URL and keep the kind.
-	for _, want := range []string{`<fieldset id="options" hx-swap-oob="true">`, `value="audio" checked`, `<option value="best" selected>Best (original)</option>`} {
+	for _, want := range []string{`<fieldset id="options" class="options" hx-swap-oob="true">`, `value="audio" checked`, `<option value="best" selected>Best (original)</option>`} {
 		if !strings.Contains(b, want) {
 			t.Errorf("response lacks %q\n%s", want, b)
 		}
@@ -300,7 +300,7 @@ func TestProbeHTMX(t *testing.T) {
 		t.Fatalf("asked %q", p.asked)
 	}
 	for _, want := range []string{
-		`<fieldset id="options">`,
+		`<fieldset id="options" class="options">`,
 		`name="probed_url" value="https://example.com/v"`,
 		`<optgroup label="Up to"><option value="2160">2160p60</option><option value="1080">1080p</option></optgroup>`,
 		`<option value="fmt-251">Opus 129 kbps (webm, medium)</option>`,

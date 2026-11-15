@@ -1,0 +1,96 @@
+{{define "subs-page" -}}
+{{template "top" .}}
+<details class="add-sub"{{if .Error}} open{{end}}>
+  <summary class="primary">+ Add subscription</summary>
+  <form class="card submit add-sub-form" method="post" action="/subs" hx-post="/subs" hx-target="#subs" hx-swap="outerHTML" hx-sync="#subs:replace">
+    <label for="sub-url">Channel or playlist URL</label>
+    <div class="compose-main">
+      <input id="sub-url" name="url" type="url" required autocomplete="off" placeholder="https://www.youtube.com/@channel" value="{{.Form.URL}}">
+      <button type="submit" class="primary">Subscribe</button>
+    </div>
+    <div class="field-grid">
+      <div class="field">
+        <label for="sub-name">Name</label>
+        <input id="sub-name" name="name" type="text" maxlength="100" autocomplete="off" placeholder="From the channel" value="{{.Form.Name}}">
+        <span class="hint">Also the folder its files go to</span>
+      </div>
+      <div class="field">
+        <span class="field-label">Download</span>
+        <div class="segmented" role="radiogroup" aria-label="Download">
+          <label><input type="radio" name="mode" value="all"{{if ne .Form.Mode "new"}} checked{{end}}><span>Everything, then new</span></label>
+          <label><input type="radio" name="mode" value="new"{{if eq .Form.Mode "new"}} checked{{end}}><span>Only new uploads</span></label>
+        </div>
+      </div>
+      <div class="field options">
+        <span class="field-label">Save as</span>
+        <div class="field-row">
+          <div class="segmented" role="radiogroup" aria-label="Save as">
+            <label><input type="radio" name="kind" value="video"{{if ne .Form.Kind "audio"}} checked{{end}}><span>Video</span></label>
+            <label><input type="radio" name="kind" value="audio"{{if eq .Form.Kind "audio"}} checked{{end}}><span>Audio</span></label>
+          </div>
+          <select name="video_quality" class="q-video" aria-label="Video quality">
+            <option value="best"{{if eq .Form.VideoQuality "best"}} selected{{end}}>Best</option>
+            <optgroup label="Up to">{{range .Heights}}<option value="{{.Value}}"{{if eq .Value $.Form.VideoQuality}} selected{{end}}>{{.Label}}</option>{{end}}</optgroup>
+          </select>
+          <select name="audio_quality" class="q-audio" aria-label="Audio quality">
+            <option value="best"{{if eq .Form.AudioQuality "best"}} selected{{end}}>Best (original)</option>
+            <optgroup label="Convert to MP3">{{range .MP3}}<option value="{{.Value}}"{{if eq .Value $.Form.AudioQuality}} selected{{end}}>{{.Label}}</option>{{end}}</optgroup>
+          </select>
+        </div>
+      </div>
+    </div>
+    {{with .Error}}<p class="error" role="alert">{{.}}</p>{{end}}
+  </form>
+</details>
+
+{{template "subs" .List}}
+{{template "bottom" .}}
+{{- end}}
+
+{{define "subs" -}}
+<section id="subs" class="list" aria-live="polite" hx-sync="this:drop"{{if .Checking}} hx-get="/subs/list" hx-trigger="every 2s" hx-swap="outerHTML"{{end}}>
+  {{with .Error}}<p class="error" role="alert">{{.}}</p>{{end}}
+  <div class="list-head"><span class="count">{{len .Subs}} subscriptions, each checked every {{.Interval}}</span></div>
+  {{if not .Subs}}<p class="empty">No subscriptions yet. Add a channel or playlist and ukai keeps its folder up to date.</p>{{end}}
+  {{if .Subs}}<ol class="rows">
+  {{range .Subs}}
+    <li class="row sub{{if .Paused}} paused{{end}}">
+      <div class="avatar tone-{{.Tone}}" aria-hidden="true">{{.Initial}}</div>
+      <div class="main">
+        <a class="title" href="{{.URL}}" rel="noopener noreferrer" target="_blank">{{.Name}}</a>
+        <div class="meta"><span>{{.Detail}}</span></div>
+        <p class="status">{{.Status}}</p>
+        {{with .Error}}<p class="job-error">{{.}}</p>{{end}}
+      </div>
+      <div class="side">
+        <span class="badge">{{.Mode}}</span>
+        <span class="badge">{{.Kind}} · {{.Quality}}</span>
+        {{if .Checking}}<span class="pill checking"><svg class="spin" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3a9 9 0 1 0 9 9"/></svg>Checking</span>{{else if .Paused}}<span class="pill">Paused</span>{{end}}
+      </div>
+      <div class="actions">
+        <form method="post" action="/subs/{{.ID}}/check" hx-post="/subs/{{.ID}}/check" hx-target="#subs" hx-swap="outerHTML" hx-sync="#subs:replace">
+          <button type="submit" class="icon-btn" title="Check now" aria-label="Check now"{{if .Checking}} disabled{{end}}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 11a8 8 0 1 0-2.3 5.7M20 5v6h-6"/></svg></button>
+        </form>
+        {{if .Paused}}
+        <form method="post" action="/subs/{{.ID}}/resume" hx-post="/subs/{{.ID}}/resume" hx-target="#subs" hx-swap="outerHTML" hx-sync="#subs:replace">
+          <button type="submit" class="icon-btn" title="Resume" aria-label="Resume"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 5v14l11-7z"/></svg></button>
+        </form>
+        {{else}}
+        <form method="post" action="/subs/{{.ID}}/pause" hx-post="/subs/{{.ID}}/pause" hx-target="#subs" hx-swap="outerHTML" hx-sync="#subs:replace">
+          <button type="submit" class="icon-btn" title="Pause" aria-label="Pause"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5v14M16 5v14"/></svg></button>
+        </form>
+        {{end}}
+        <details class="more">
+          <summary class="icon-btn" title="More" aria-label="More"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="5" cy="12" r="1.4"/><circle cx="12" cy="12" r="1.4"/><circle cx="19" cy="12" r="1.4"/></svg></summary>
+          <div class="menu">
+            <form method="post" action="/subs/{{.ID}}/remove" hx-post="/subs/{{.ID}}/remove" hx-target="#subs" hx-swap="outerHTML" hx-sync="#subs:replace" hx-confirm="Unsubscribe from {{.Name}}? The downloaded files stay.">
+              <button type="submit" class="menu-item danger">Unsubscribe</button>
+            </form>
+          </div>
+        </details>
+      </div>
+    </li>
+  {{end}}
+  </ol>{{end}}
+</section>
+{{- end}}

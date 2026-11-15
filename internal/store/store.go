@@ -1,7 +1,8 @@
-// Package store keeps ukai's job list.
+// Package store keeps ukai's job list and subscriptions.
 //
-// The Store interface hides where jobs live. JSON, the only implementation,
-// keeps them in one file that is replaced atomically on every save.
+// The Store and SubStore interfaces hide where they live. JSON, the only
+// implementation, keeps each in one file that is replaced atomically on
+// every save.
 package store
 
 import (
@@ -55,7 +56,13 @@ type Job struct {
 	// Files are paths relative to the download directory.
 	Files []string `json:"files,omitempty"`
 	// Size is the total size of Files in bytes when they were written.
-	Size       int64     `json:"size,omitempty"`
+	Size int64 `json:"size,omitempty"`
+	// Sub is the ID of the subscription that queued the job, SubName its
+	// name then, and Folder the directory under the download directory the
+	// files go to. All three are empty for a job submitted by hand.
+	Sub        string    `json:"sub,omitempty"`
+	SubName    string    `json:"sub_name,omitempty"`
+	Folder     string    `json:"folder,omitempty"`
 	Error      string    `json:"error,omitempty"`
 	CreatedAt  time.Time `json:"created_at"`
 	StartedAt  time.Time `json:"started_at,omitzero"`
@@ -64,6 +71,53 @@ type Job struct {
 
 // Active reports whether the job is waiting or running.
 func (j Job) Active() bool { return j.State == Queued || j.State == Running }
+
+// SubMode is how a subscription treats what a channel already has.
+type SubMode string
+
+const (
+	// SubAll downloads everything the channel has, then each new upload.
+	SubAll SubMode = "all"
+	// SubNew downloads only what appears after the subscription is added.
+	SubNew SubMode = "new"
+)
+
+// Valid reports whether m is a known mode.
+func (m SubMode) Valid() bool { return m == SubAll || m == SubNew }
+
+// Sub is a subscription to a channel or playlist.
+type Sub struct {
+	ID   string `json:"id"`
+	URL  string `json:"url"`
+	Name string `json:"name"`
+	// Folder is the directory under the download directory its files go to,
+	// empty until the first check names it.
+	Folder  string  `json:"folder,omitempty"`
+	Mode    SubMode `json:"mode"`
+	Kind    Kind    `json:"kind"`
+	Quality string  `json:"quality,omitempty"`
+	Paused  bool    `json:"paused,omitempty"`
+	// Ready is set once the first check is done: everything was queued (all)
+	// or written to the download archive without downloading (new).
+	Ready     bool      `json:"ready,omitempty"`
+	CreatedAt time.Time `json:"created_at"`
+	CheckedAt time.Time `json:"checked_at,omitzero"`
+	// CheckError is why the last check failed, empty when it worked.
+	CheckError string `json:"check_error,omitempty"`
+	// Queued counts the downloads the subscription has queued.
+	Queued int `json:"queued,omitempty"`
+	// Failures counts failed downloads by video URL, and Skipped holds the
+	// URLs of downloads that were canceled. Both outlive the job list, so a
+	// check leaves those videos alone after the jobs are cleared.
+	Failures map[string]int  `json:"failures,omitempty"`
+	Skipped  map[string]bool `json:"skipped,omitempty"`
+}
+
+// SubStore loads and saves the whole subscription list.
+type SubStore interface {
+	LoadSubs() ([]Sub, error)
+	SaveSubs([]Sub) error
+}
 
 // Store loads and saves the whole job list.
 type Store interface {
@@ -78,10 +132,16 @@ type jobsFile struct {
 	Jobs    []Job `json:"jobs"`
 }
 
-// JSON keeps jobs in <dir>/jobs.json.
+type subsFile struct {
+	Version int   `json:"version"`
+	Subs    []Sub `json:"subs"`
+}
+
+// JSON keeps jobs in <dir>/jobs.json and subscriptions in <dir>/subs.json.
 type JSON struct {
-	mu   sync.Mutex
-	path string
+	mu       sync.Mutex
+	path     string
+	subsPath string
 }
 
 // OpenJSON creates dir if needed and returns a store that uses it.
@@ -89,7 +149,7 @@ func OpenJSON(dir string) (*JSON, error) {
 	if err := os.MkdirAll(dir, 0o750); err != nil {
 		return nil, err
 	}
-	return &JSON{path: filepath.Join(dir, "jobs.json")}, nil
+	return &JSON{path: filepath.Join(dir, "jobs.json"), subsPath: filepath.Join(dir, "subs.json")}, nil
 }
 
 // LoadJobs returns the saved jobs, or none if nothing was saved yet.
@@ -124,11 +184,43 @@ func (s *JSON) SaveJobs(jobs []Job) error {
 	return writeAtomic(s.path, append(data, '\n'))
 }
 
+// LoadSubs returns the saved subscriptions, or none if nothing was saved yet.
+func (s *JSON) LoadSubs() ([]Sub, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	data, err := os.ReadFile(s.subsPath)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	var f subsFile
+	if err := json.Unmarshal(data, &f); err != nil {
+		return nil, fmt.Errorf("%s: %w", s.subsPath, err)
+	}
+	if f.Version != fileVersion {
+		return nil, fmt.Errorf("%s: version %d is not supported (want %d)", s.subsPath, f.Version, fileVersion)
+	}
+	return f.Subs, nil
+}
+
+// SaveSubs replaces the saved subscriptions with subs.
+func (s *JSON) SaveSubs(subs []Sub) error {
+	data, err := json.MarshalIndent(subsFile{Version: fileVersion, Subs: subs}, "", "  ")
+	if err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return writeAtomic(s.subsPath, append(data, '\n'))
+}
+
 // writeAtomic writes data to a temporary file next to path and renames it
 // over path, so a crash leaves either the old file or the new one.
 func writeAtomic(path string, data []byte) (err error) {
 	dir := filepath.Dir(path)
-	tmp, err := os.CreateTemp(dir, ".jobs-*.tmp")
+	tmp, err := os.CreateTemp(dir, "."+filepath.Base(path)+"-*.tmp")
 	if err != nil {
 		return err
 	}

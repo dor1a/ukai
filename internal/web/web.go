@@ -25,6 +25,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/dor1a/ukai/internal/auth"
 	"github.com/dor1a/ukai/internal/jobs"
 	"github.com/dor1a/ukai/internal/store"
 	"github.com/dor1a/ukai/internal/ytdlp"
@@ -75,6 +76,16 @@ type Server struct {
 	tpl     *template.Template
 	// files is the download directory, nil when files are not served.
 	files *os.Root
+	// now gives the time relative times count from. Nil means time.Now.
+	now func() time.Time
+	// subs is nil until UseSubs turns the subscription pages on.
+	subs         Subs
+	subsInterval time.Duration
+	// auth is nil until UseAuth puts the pages behind sign-in.
+	auth     *auth.Auth
+	gravatar bool
+	// apiTokens are the callers UseAPI lets in. None means no API.
+	apiTokens []apiKey
 }
 
 // New parses the templates. A nil prober turns the quality lookup off, and an
@@ -99,25 +110,55 @@ func New(j Jobs, p Prober, downloadDir string, log *slog.Logger, version string)
 	return s, nil
 }
 
-// Handler returns the routes, guarded against cross-site form posts.
+// Handler returns the routes, guarded against cross-site form posts. With
+// sign-in on, only /healthz, the static files and the sign-in routes are open.
+// The API under /api/ takes its own tokens instead of a session. A token is
+// no cookie a browser sends by itself, so the API skips the cross-site guard
+// and answers every request in JSON.
 func (s *Server) Handler() http.Handler {
 	static, _ := fs.Sub(staticFS, "static")
+	app := http.NewServeMux()
+	app.HandleFunc("GET /{$}", s.index)
+	app.HandleFunc("GET /jobs", s.list)
+	app.HandleFunc("POST /jobs", s.submit)
+	app.HandleFunc("POST /jobs/{id}/cancel", s.cancel)
+	app.HandleFunc("POST /jobs/{id}/retry", s.retry)
+	app.HandleFunc("POST /jobs/{id}/remove", s.remove)
+	app.HandleFunc("POST /jobs/clear", s.clear)
+	app.HandleFunc("GET /files/{id}/{n}", s.file)
+	app.HandleFunc("GET /subs", s.subsIndex)
+	app.HandleFunc("GET /subs/list", s.subsFragment)
+	app.HandleFunc("POST /subs", s.subscribe)
+	app.HandleFunc("POST /subs/{id}/check", s.subCheck)
+	app.HandleFunc("POST /subs/{id}/pause", s.subPause)
+	app.HandleFunc("POST /subs/{id}/resume", s.subResume)
+	app.HandleFunc("POST /subs/{id}/remove", s.subRemove)
+	app.HandleFunc("POST /probe", s.probe)
+
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /{$}", s.index)
-	mux.HandleFunc("GET /jobs", s.list)
-	mux.HandleFunc("POST /jobs", s.submit)
-	mux.HandleFunc("POST /jobs/{id}/cancel", s.cancel)
-	mux.HandleFunc("POST /jobs/{id}/retry", s.retry)
-	mux.HandleFunc("POST /jobs/{id}/remove", s.remove)
-	mux.HandleFunc("POST /jobs/clear", s.clear)
-	mux.HandleFunc("GET /files/{id}/{n}", s.file)
-	mux.HandleFunc("POST /probe", s.probe)
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		fmt.Fprintln(w, "ok")
 	})
 	mux.Handle("GET /static/", http.StripPrefix("/static/", http.FileServerFS(static)))
-	return securityHeaders(http.NewCrossOriginProtection().Handler(mux))
+	if s.auth != nil {
+		mux.HandleFunc("GET /login", s.auth.Login)
+		mux.HandleFunc("GET /oauth/callback", s.auth.Callback)
+		mux.HandleFunc("GET /logout", s.auth.Logout)
+		mux.HandleFunc("GET /signed-out", s.signedOut)
+		mux.Handle("/", s.auth.Require(app))
+	} else {
+		mux.Handle("/", app)
+	}
+	site := securityHeaders(http.NewCrossOriginProtection().Handler(mux))
+	api := securityHeaders(s.api())
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api" || strings.HasPrefix(r.URL.Path, "/api/") {
+			api.ServeHTTP(w, r)
+			return
+		}
+		site.ServeHTTP(w, r)
+	})
 }
 
 func securityHeaders(next http.Handler) http.Handler {
@@ -142,15 +183,23 @@ type listData struct {
 	// Total counts every job, Finished the ones that can be removed.
 	Total    int
 	Finished int
+	// Counts are the jobs that match the search and kind, by state. The
+	// state chips show them; CountsOOB sends them along with a list fragment.
+	Counts    counts
+	CountsOOB bool
 	// Unsaved is when saving the job list started failing, empty while saved.
 	Unsaved string
 }
 
 type pageData struct {
 	Version string
-	List    listData
-	Filter  filter
-	URL     string
+	// User is the signed-in user, nil without sign-in.
+	User *account
+	// Page names the tab the page belongs to; empty is Downloads.
+	Page   string
+	List   listData
+	Filter filter
+	URL    string
 	// URLBox is URL as the "urlbox" template shows it.
 	URLBox  urlBox
 	Options optionsData
@@ -238,10 +287,11 @@ func has(list []ytdlp.Option, value string) bool {
 	return false
 }
 
-// page fills in the version and, when the page has no choices yet, the
-// defaults: video at the best quality.
-func (s *Server) page(p pageData) pageData {
+// page fills in the version and the user and, when the page has no choices
+// yet, the defaults: video at the best quality.
+func (s *Server) page(r *http.Request, p pageData) pageData {
 	p.Version = s.version
+	p.User = s.account(r)
 	p.URLBox = urlBox{Value: p.URL}
 	if p.Options.Kind == "" {
 		p.Options = options(formValues{Kind: string(store.KindVideo)}, nil)
@@ -259,6 +309,19 @@ type row struct {
 	State   string
 	// Thumbnail is an https image URL, or empty.
 	Thumbnail string
+	// Sub names the subscription that queued the job, if one did.
+	Sub string
+	// StateKey is the state in lower case, for styling; StateText is shown.
+	StateKey  string
+	StateText string
+	// Ago is when the job was submitted, relative to now; WhenISO the same
+	// time for the datetime attribute.
+	Ago     string
+	WhenISO string
+	// SaveURL and SaveName are the first file; MoreFiles the others.
+	SaveURL   string
+	SaveName  string
+	MoreFiles []fileLink
 	// Meta is the uploader, length and size, as far as they are known.
 	Meta     string
 	Percent  int // -1 when unknown or not running
@@ -278,6 +341,10 @@ type row struct {
 // downloads it; both are empty when files are not served.
 type fileLink struct {
 	Name, URL, SaveURL string
+}
+
+type counts struct {
+	All, Active, Done, Failed int
 }
 
 // filter narrows the job list. Empty fields match everything.
@@ -364,11 +431,24 @@ func (s *Server) listData(f filter, errMsg string) listData {
 	if t := s.jobs.UnsavedSince(); !t.IsZero() {
 		d.Unsaved = t.Local().Format("2006-01-02 15:04")
 	}
+	facet := f
+	facet.State = ""
 	for _, v := range views {
 		if v.Active() {
 			d.Active = true
 		} else {
 			d.Finished++
+		}
+		if facet.match(v) {
+			d.Counts.All++
+			switch {
+			case v.Active():
+				d.Counts.Active++
+			case v.State == store.Done:
+				d.Counts.Done++
+			default:
+				d.Counts.Failed++
+			}
 		}
 		if f.match(v) {
 			d.Jobs = append(d.Jobs, s.toRow(v))
@@ -389,6 +469,7 @@ func (s *Server) toRow(v jobs.View) row {
 		Quality:   ytdlp.QualityLabel(v.Kind == store.KindAudio, cmpOr(v.Quality, "best")),
 		State:     label(string(v.State)),
 		Thumbnail: httpsURL(v.Thumbnail),
+		Sub:       v.SubName,
 		Meta:      metaText(v),
 		Percent:   -1,
 		Error:     v.Error,
@@ -405,6 +486,18 @@ func (s *Server) toRow(v jobs.View) row {
 		}
 		r.Files = append(r.Files, l)
 	}
+	r.StateKey = strings.ToLower(string(v.State))
+	r.StateText = r.State
+	r.Ago = ago(v.CreatedAt, s.clock())
+	r.WhenISO = v.CreatedAt.UTC().Format(time.RFC3339)
+	switch {
+	case len(r.Files) > 0 && s.files != nil:
+		r.SaveURL, r.SaveName = r.Files[0].SaveURL, path.Base(r.Files[0].Name)
+		r.MoreFiles = r.Files[1:]
+	default:
+		// Without file serving there is no save button, so the names are listed.
+		r.MoreFiles = r.Files
+	}
 	if v.State == store.Done && len(r.Files) > 0 && r.Files[0].URL != "" {
 		r.Media, r.PlayURL = string(v.Kind), r.Files[0].URL
 	}
@@ -418,6 +511,30 @@ func (s *Server) toRow(v jobs.View) row {
 		r.Progress = progressText(*v.Live)
 	}
 	return r
+}
+
+func (s *Server) clock() time.Time {
+	if s.now != nil {
+		return s.now()
+	}
+	return time.Now()
+}
+
+// ago says how long before now t was, e.g. "5 min ago", or gives the date
+// after a week.
+func ago(t, now time.Time) string {
+	d := now.Sub(t)
+	switch {
+	case d < time.Minute:
+		return "just now"
+	case d < time.Hour:
+		return fmt.Sprintf("%d min ago", int(d.Minutes()))
+	case d < 24*time.Hour:
+		return fmt.Sprintf("%d h ago", int(d.Hours()))
+	case d < 7*24*time.Hour:
+		return fmt.Sprintf("%d d ago", int(d.Hours()/24))
+	}
+	return t.Local().Format("2006-01-02")
 }
 
 // httpsURL returns raw if it is an https URL with a host, otherwise "".
@@ -508,11 +625,19 @@ func isHTMX(r *http.Request) bool { return r.Header.Get("HX-Request") == "true" 
 
 func (s *Server) index(w http.ResponseWriter, r *http.Request) {
 	f := readFilter(r)
-	s.render(w, http.StatusOK, "index", s.page(pageData{List: s.listData(f, ""), Filter: f}))
+	s.render(w, http.StatusOK, "index", s.page(r, pageData{List: s.listData(f, ""), Filter: f}))
 }
 
 func (s *Server) list(w http.ResponseWriter, r *http.Request) {
-	s.render(w, http.StatusOK, "jobs", s.listData(readFilter(r), ""))
+	s.render(w, http.StatusOK, "jobs", s.fragment(readFilter(r), ""))
+}
+
+// fragment is the list as an HTMX response: the state counts in the filter
+// bar outside it come along out of band.
+func (s *Server) fragment(f filter, errMsg string) listData {
+	d := s.listData(f, errMsg)
+	d.CountsOOB = true
+	return d
 }
 
 // splitURLs returns the non-empty lines of raw, trimmed.
@@ -581,7 +706,7 @@ func (s *Server) submit(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case isHTMX(r) && msg != "" && queued == 0:
 		w.Header().Set("X-Ukai-Error", "1")
-		s.render(w, http.StatusOK, "jobs", s.listData(lf, msg))
+		s.render(w, http.StatusOK, "jobs", s.fragment(lf, msg))
 	case isHTMX(r) && msg != "":
 		// Part of the batch was queued: keep the choices, and leave only the
 		// URLs that were not queued in the box.
@@ -589,7 +714,7 @@ func (s *Server) submit(w http.ResponseWriter, r *http.Request) {
 		s.render(w, http.StatusOK, "partial", struct {
 			List listData
 			Box  urlBox
-		}{s.listData(lf, msg), urlBox{Value: rest, OOB: true}})
+		}{s.fragment(lf, msg), urlBox{Value: rest, OOB: true}})
 	case isHTMX(r):
 		// Queued: put the choices back to the defaults for the next URL, and
 		// keep the kind.
@@ -598,13 +723,13 @@ func (s *Server) submit(w http.ResponseWriter, r *http.Request) {
 		s.render(w, http.StatusOK, "submitted", struct {
 			List    listData
 			Options optionsData
-		}{s.listData(lf, msg), o})
+		}{s.fragment(lf, msg), o})
 	case msg != "":
 		box := f.URL
 		if queued > 0 {
 			box = rest
 		}
-		s.render(w, http.StatusBadRequest, "index", s.page(pageData{List: s.listData(lf, ""), Filter: lf, URL: box, Options: options(f, nil), Error: msg}))
+		s.render(w, http.StatusBadRequest, "index", s.page(r, pageData{List: s.listData(lf, ""), Filter: lf, URL: box, Options: options(f, nil), Error: msg}))
 	default:
 		http.Redirect(w, r, home(lf), http.StatusSeeOther)
 	}
@@ -684,7 +809,7 @@ func (s *Server) probe(w http.ResponseWriter, r *http.Request) {
 		status = http.StatusBadRequest
 	}
 	lf := readFilter(r)
-	s.render(w, status, "index", s.page(pageData{List: s.listData(lf, ""), Filter: lf, URL: f.URL, Options: o}))
+	s.render(w, status, "index", s.page(r, pageData{List: s.listData(lf, ""), Filter: lf, URL: f.URL, Options: o}))
 }
 
 // lookup runs the prober within probeTimeout and probeSlots.
@@ -754,11 +879,11 @@ func (s *Server) act(w http.ResponseWriter, r *http.Request, do func() error) {
 	msg := s.userMessage(err)
 	switch {
 	case isHTMX(r):
-		s.render(w, http.StatusOK, "jobs", s.listData(f, msg))
+		s.render(w, http.StatusOK, "jobs", s.fragment(f, msg))
 	case errors.Is(err, jobs.ErrNotFound):
-		s.render(w, http.StatusNotFound, "index", s.page(pageData{List: s.listData(f, ""), Filter: f, Error: msg}))
+		s.render(w, http.StatusNotFound, "index", s.page(r, pageData{List: s.listData(f, ""), Filter: f, Error: msg}))
 	case msg != "":
-		s.render(w, http.StatusConflict, "index", s.page(pageData{List: s.listData(f, ""), Filter: f, Error: msg}))
+		s.render(w, http.StatusConflict, "index", s.page(r, pageData{List: s.listData(f, ""), Filter: f, Error: msg}))
 	default:
 		http.Redirect(w, r, home(f), http.StatusSeeOther)
 	}

@@ -85,3 +85,29 @@ func TestKindValid(t *testing.T) {
 		t.Fatal("Kind.Valid is wrong")
 	}
 }
+
+func TestSubsRoundTrip(t *testing.T) {
+	s, err := OpenJSON(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if subs, err := s.LoadSubs(); err != nil || subs != nil {
+		t.Fatalf("empty store: %v, %v", subs, err)
+	}
+	at := time.Date(2026, 11, 15, 12, 0, 0, 0, time.UTC)
+	want := []Sub{{ID: "s1", URL: "https://www.youtube.com/@band/videos", Name: "Band", Folder: "Band", Mode: SubNew, Kind: KindAudio, Quality: "mp3-320", Ready: true, CreatedAt: at, CheckedAt: at, Queued: 3,
+		Failures: map[string]int{"https://www.youtube.com/watch?v=a": 2}, Skipped: map[string]bool{"https://www.youtube.com/watch?v=b": true}}}
+	if err := s.SaveSubs(want); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.LoadSubs()
+	if err != nil || !reflect.DeepEqual(got, want) {
+		t.Fatalf("got %+v, %v", got, err)
+	}
+	if jobs, err := s.LoadJobs(); err != nil || jobs != nil {
+		t.Fatalf("subscriptions leaked into jobs: %v, %v", jobs, err)
+	}
+	if !SubAll.Valid() || !SubNew.Valid() || SubMode("both").Valid() {
+		t.Fatal("SubMode.Valid")
+	}
+}

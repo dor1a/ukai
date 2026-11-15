@@ -57,3 +57,64 @@ document.addEventListener("htmx:beforeSwap", function (event) {
     event.detail.shouldSwap = false;
   }
 });
+
+// The play button opens the player under its row and starts it; pressing it
+// again hides and pauses it. The player keeps its state across refreshes
+// (hx-preserve), so the button is set to match after each swap.
+document.addEventListener("click", function (event) {
+  var button = event.target.closest && event.target.closest("[data-play]");
+  if (!button) {
+    return;
+  }
+  var player = document.getElementById(button.getAttribute("data-play"));
+  if (!player) {
+    return;
+  }
+  var media = player.querySelector("audio, video");
+  player.hidden = !player.hidden;
+  button.setAttribute("aria-expanded", player.hidden ? "false" : "true");
+  if (media) {
+    if (player.hidden) {
+      media.pause();
+    } else {
+      var started = media.play();
+      if (started && started.catch) {
+        started.catch(function () {});
+      }
+    }
+  }
+});
+
+document.addEventListener("htmx:afterSettle", function () {
+  var buttons = document.querySelectorAll("[data-play]");
+  for (var i = 0; i < buttons.length; i++) {
+    var player = document.getElementById(buttons[i].getAttribute("data-play"));
+    buttons[i].setAttribute("aria-expanded", player && !player.hidden ? "true" : "false");
+  }
+});
+
+// A menu closes when something outside it is clicked.
+document.addEventListener("click", function (event) {
+  var open = document.querySelectorAll("details.more[open]");
+  for (var i = 0; i < open.length; i++) {
+    if (!open[i].contains(event.target)) {
+      open[i].open = false;
+    }
+  }
+});
+
+// After a subscription was added, fold the form away again.
+document.addEventListener("htmx:afterRequest", function (event) {
+  var form = event.target;
+  if (!form.matches || !form.matches("form.add-sub-form")) {
+    return;
+  }
+  var xhr = event.detail.xhr;
+  if (event.detail.successful && xhr && !xhr.getResponseHeader("X-Ukai-Error")) {
+    form.reset();
+    var details = form.closest("details");
+    if (details) {
+      details.open = false;
+    }
+  }
+});

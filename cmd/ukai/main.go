@@ -17,14 +17,17 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
 	_ "time/tzdata" // TZ works in images without zoneinfo
 
+	"github.com/dor1a/ukai/internal/auth"
 	"github.com/dor1a/ukai/internal/config"
 	"github.com/dor1a/ukai/internal/jobs"
 	"github.com/dor1a/ukai/internal/store"
+	"github.com/dor1a/ukai/internal/subs"
 	"github.com/dor1a/ukai/internal/web"
 	"github.com/dor1a/ukai/internal/ytdlp"
 )
@@ -82,7 +85,19 @@ func serve() error {
 		History:     cfg.JobHistory,
 		DownloadDir: cfg.DownloadDir,
 		TempRoot:    filepath.Join(cfg.DataDir, "tmp"),
+		ArchiveDir:  filepath.Join(cfg.DataDir, "archive"),
 		Log:         log,
+	})
+	if err != nil {
+		return err
+	}
+	subscriptions, err := subs.New(subs.Options{
+		Store:      st,
+		Lister:     runner,
+		Queue:      mgr,
+		ArchiveDir: filepath.Join(cfg.DataDir, "archive"),
+		Interval:   cfg.SubsInterval,
+		Log:        log,
 	})
 	if err != nil {
 		return err
@@ -91,6 +106,30 @@ func serve() error {
 	if err != nil {
 		return err
 	}
+	site.UseSubs(subscriptions, cfg.SubsInterval)
+	if len(cfg.APITokens) > 0 {
+		tokens := make([]web.APIToken, len(cfg.APITokens))
+		names := make([]string, len(cfg.APITokens))
+		for i, t := range cfg.APITokens {
+			tokens[i], names[i] = web.APIToken{Name: t.Name, Token: t.Token}, t.Name
+		}
+		site.UseAPI(tokens)
+		log.Info("api on", "tokens", strings.Join(names, ","))
+	}
+	if cfg.Auth == config.AuthOIDC {
+		o := cfg.OIDC
+		site.UseAuth(auth.New(auth.Settings{
+			PublicURL:    o.PublicURL,
+			Issuer:       o.Issuer,
+			ClientID:     o.ClientID,
+			ClientSecret: o.ClientSecret,
+			Group:        o.Group,
+			GroupsClaim:  o.GroupsClaim,
+			Scopes:       o.Scopes,
+			SessionKey:   o.SessionKey,
+		}, log), o.Gravatar)
+	}
+	mgr.SetOnFinish(subscriptions.JobFinished)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -100,6 +139,11 @@ func serve() error {
 		mgr.Run(ctx)
 		close(workers)
 	}()
+	checks := make(chan struct{})
+	go func() {
+		subscriptions.Run(ctx)
+		close(checks)
+	}()
 
 	srv := &http.Server{
 		Addr:              cfg.Listen,
@@ -108,7 +152,10 @@ func serve() error {
 	}
 	serveErr := make(chan error, 1)
 	go func() { serveErr <- srv.ListenAndServe() }()
-	log.Info("ukai started", "version", version, "listen", cfg.Listen, "auth", cfg.Auth, "workers", cfg.Concurrency)
+	log.Info("ukai started", "version", version, "listen", cfg.Listen, "auth", cfg.Auth, "workers", cfg.Concurrency, "subs_interval", cfg.SubsInterval)
+	if cfg.Auth == config.AuthOIDC {
+		log.Info("sign-in required", "issuer", cfg.OIDC.Issuer, "group", cfg.OIDC.Group, "public_url", cfg.OIDC.PublicURL)
+	}
 
 	select {
 	case <-ctx.Done():
@@ -116,6 +163,7 @@ func serve() error {
 		if !errors.Is(err, http.ErrServerClosed) {
 			stop()
 			<-workers
+			<-checks
 			return err
 		}
 	}
@@ -124,6 +172,7 @@ func serve() error {
 	defer cancel()
 	srv.Shutdown(shutdownCtx)
 	<-workers
+	<-checks
 	return nil
 }
 

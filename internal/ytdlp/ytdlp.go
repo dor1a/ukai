@@ -23,6 +23,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"slices"
 	"strconv"
@@ -93,6 +94,11 @@ type Request struct {
 	OutDir string
 	// TempDir holds the partial files of this download.
 	TempDir string
+	// Subdir, when set, is a directory under OutDir the files go to.
+	Subdir string
+	// Archive, when set, is a yt-dlp download archive: the video is skipped
+	// if it is listed there, and added to it once it is downloaded.
+	Archive string
 }
 
 // Meta is what yt-dlp reports about the video before downloading it.
@@ -177,9 +183,12 @@ func Args(req Request) []string {
 		"--print", "before_dl:ukai-meta thumbnail %(thumbnail)j",
 		"--print", "before_dl:ukai-meta duration %(duration)j",
 		"--print", "after_move:ukai-file %(filepath)j",
-		"--paths", req.OutDir,
+		"--paths", filepath.Join(req.OutDir, req.Subdir),
 		"--paths", "temp:" + req.TempDir,
 		"--output", outputTemplate(req.Audio, req.Quality),
+	}
+	if req.Archive != "" {
+		args = append(args, "--download-archive", req.Archive)
 	}
 	args = append(args, qualityArgs(req.Audio, req.Quality)...)
 	// "--" ends the options, so a URL can never be read as one.

@@ -74,7 +74,7 @@ func TestPollKeepsTheFilter(t *testing.T) {
 		t.Fatalf("poll lost the filter:\n%s", b)
 	}
 	page := do(server(t, sampleJobs()), "GET", "/?q=Band&show=audio", nil, nil).Body.String()
-	if !strings.Contains(page, `id="q" name="q" type="search"`) || !strings.Contains(page, `value="Band"`) || !strings.Contains(page, `<option value="audio" selected>Audio</option>`) {
+	if !strings.Contains(page, `id="q" name="q" type="search"`) || !strings.Contains(page, `value="Band"`) || !strings.Contains(page, `<input type="radio" name="show" value="audio" checked>`) {
 		t.Fatalf("page does not show the filter it was asked for")
 	}
 }
@@ -240,10 +240,10 @@ func TestDoneRowsLinkTheirFiles(t *testing.T) {
 	h, _ := fileServer(t)
 	b := do(h, "GET", "/jobs", nil, nil).Body.String()
 	for _, want := range []string{
-		`<details class="play" id="play-j1" hx-preserve="true">`,
+		`data-play="play-j1"`, `<div class="player" id="play-j1" hx-preserve="true" hidden>`,
 		`<audio controls preload="none" src="/files/j1/0"></audio>`,
 		`<video controls preload="none" src="/files/j2/0"></video>`,
-		`<a href="/files/j1/0?dl=1">sub/노래 [x] 320k.mp3</a>`,
+		`href="/files/j1/0?dl=1" title="Save 노래 [x] 320k.mp3"`,
 	} {
 		if !strings.Contains(b, want) {
 			t.Errorf("list lacks %q", want)

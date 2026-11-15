@@ -3,9 +3,13 @@ package jobs
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/dor1a/ukai/internal/store"
 	"github.com/dor1a/ukai/internal/ytdlp"
@@ -182,5 +186,144 @@ func TestJobKeepsThumbnailAndFileSize(t *testing.T) {
 	}
 	if _, ok := m.Get("nope"); ok {
 		t.Fatal("Get found an unknown job")
+	}
+}
+
+func TestSubscriptionJobsGoToTheirFolderAndArchive(t *testing.T) {
+	e := newEnv(t)
+	m, err := New(Options{
+		Store: e.store, Runner: e.runner, Workers: 1, History: 10,
+		DownloadDir: e.dl, TempRoot: filepath.Join(e.data, "tmp"), ArchiveDir: filepath.Join(e.data, "archive"),
+		Log: slog.New(slog.NewTextHandler(e.logs, nil)),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, ref := range []SubRef{{}, {ID: "s1"}, {ID: "s1", Folder: "../x"}, {ID: "../s", Folder: "Band"}, {ID: "s1", Folder: ".."}} {
+		if _, err := m.SubmitSub("https://example.com/ok", store.KindVideo, "", ref); err == nil {
+			t.Errorf("SubmitSub accepted %+v", ref)
+		}
+	}
+	start(t, m)
+	j, err := m.SubmitSub("https://example.com/ok", store.KindAudio, "mp3-320", SubRef{ID: "s1", Name: "Band", Folder: "Band"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "done", stateIs(m, j.ID, store.Done))
+	req := e.runner.requests()[0]
+	if req.Subdir != "Band" || req.Archive != filepath.Join(e.data, "archive", "s1.txt") {
+		t.Fatalf("request = %+v", req)
+	}
+	v := find(m, j.ID)
+	if v.Sub != "s1" || v.SubName != "Band" || v.Folder != "Band" {
+		t.Fatalf("job = %+v", v.Job)
+	}
+	plain, _ := m.Submit("https://example.com/ok", store.KindVideo, "")
+	waitFor(t, "plain done", stateIs(m, plain.ID, store.Done))
+	if r := e.runner.requests()[1]; r.Subdir != "" || r.Archive != "" {
+		t.Fatalf("plain request = %+v", r)
+	}
+	e.logs.want(t, "job queued", "sub=Band")
+}
+
+func TestBadSavedSubscriptionLinksAreDropped(t *testing.T) {
+	e := newEnv(t)
+	at := time.Now()
+	e.store.SaveJobs([]store.Job{
+		{ID: "j1", URL: "https://example.com/ok", Kind: store.KindVideo, State: store.Queued, CreatedAt: at, Sub: "../../escaped", Folder: "Band"},
+		{ID: "j2", URL: "https://example.com/ok", Kind: store.KindVideo, State: store.Done, CreatedAt: at, Sub: "s1", Folder: "../out"},
+		{ID: "j3", URL: "https://example.com/ok", Kind: store.KindVideo, State: store.Done, CreatedAt: at, Sub: "s1", SubName: "Band", Folder: "Band"},
+	})
+	m := e.manager(1, 10)
+	for _, id := range []string{"j1", "j2"} {
+		if v := find(m, id); v.Sub != "" || v.Folder != "" {
+			t.Errorf("%s kept its link: %+v", id, v.Job)
+		}
+	}
+	if v := find(m, "j3"); v.Sub != "s1" || v.Folder != "Band" {
+		t.Fatalf("a good link was dropped: %+v", v.Job)
+	}
+	start(t, m)
+	waitFor(t, "j1 done", stateIs(m, "j1", store.Done))
+	if r := e.runner.requests()[0]; r.Archive != "" || r.Subdir != "" {
+		t.Fatalf("request = %+v", r)
+	}
+}
+
+func TestSymlinkedFolderOrArchiveIsRefused(t *testing.T) {
+	e := newEnv(t)
+	outside := t.TempDir()
+	archives := filepath.Join(e.data, "archive")
+	os.MkdirAll(e.dl, 0o755)
+	os.MkdirAll(archives, 0o750)
+	os.Symlink(outside, filepath.Join(e.dl, "Linked"))
+	os.Symlink(filepath.Join(outside, "a.txt"), filepath.Join(archives, "s2.txt"))
+	m, err := New(Options{
+		Store: e.store, Runner: e.runner, Workers: 1, History: 10,
+		DownloadDir: e.dl, TempRoot: filepath.Join(e.data, "tmp"), ArchiveDir: archives,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	start(t, m)
+	a, _ := m.SubmitSub("https://example.com/ok", store.KindVideo, "", SubRef{ID: "s1", Folder: "Linked"})
+	b, _ := m.SubmitSub("https://example.com/ok", store.KindVideo, "", SubRef{ID: "s2", Folder: "Band"})
+	waitFor(t, "a failed", stateIs(m, a.ID, store.Failed))
+	waitFor(t, "b failed", stateIs(m, b.ID, store.Failed))
+	if !strings.Contains(find(m, a.ID).Error, "not a plain directory") || !strings.Contains(find(m, b.ID).Error, "not a plain file") {
+		t.Fatalf("errors: %q, %q", find(m, a.ID).Error, find(m, b.ID).Error)
+	}
+	if len(e.runner.requests()) != 0 {
+		t.Fatal("yt-dlp ran for a refused download")
+	}
+}
+
+func TestFinishedJobsAreReported(t *testing.T) {
+	e := newEnv(t)
+	m := e.manager(1, 10)
+	var mu sync.Mutex
+	var seen []string
+	m.SetOnFinish(func(j store.Job) {
+		mu.Lock()
+		seen = append(seen, string(j.State)+" "+j.URL)
+		mu.Unlock()
+		// The hook runs without the manager's lock held.
+		m.List()
+	})
+	queued, _ := m.Submit("https://example.com/ok", store.KindVideo, "")
+	m.Cancel(queued.ID)
+	start(t, m)
+	done, _ := m.Submit("https://example.com/ok", store.KindVideo, "")
+	waitFor(t, "done", stateIs(m, done.ID, store.Done))
+	failed, _ := m.Submit("https://example.com/fail", store.KindVideo, "")
+	waitFor(t, "failed", stateIs(m, failed.ID, store.Failed))
+	running, _ := m.Submit("https://example.com/block", store.KindVideo, "")
+	waitFor(t, "running", stateIs(m, running.ID, store.Running))
+	m.Cancel(running.ID)
+	waitFor(t, "canceled", stateIs(m, running.ID, store.Canceled))
+	waitFor(t, "four reports", func() bool { mu.Lock(); defer mu.Unlock(); return len(seen) == 4 })
+	want := "canceled https://example.com/ok|done https://example.com/ok|failed https://example.com/fail|canceled https://example.com/block"
+	if got := strings.Join(seen, "|"); got != want {
+		t.Fatalf("reports %q", got)
+	}
+}
+
+func TestSymlinkedArchiveDirectoryIsRefused(t *testing.T) {
+	e := newEnv(t)
+	outside := t.TempDir()
+	os.MkdirAll(e.data, 0o750)
+	os.Symlink(outside, filepath.Join(e.data, "archive"))
+	m, err := New(Options{
+		Store: e.store, Runner: e.runner, Workers: 1, History: 10,
+		DownloadDir: e.dl, TempRoot: filepath.Join(e.data, "tmp"), ArchiveDir: filepath.Join(e.data, "archive"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	start(t, m)
+	j, _ := m.SubmitSub("https://example.com/ok", store.KindVideo, "", SubRef{ID: "s1", Folder: "Band"})
+	waitFor(t, "failed", stateIs(m, j.ID, store.Failed))
+	if !strings.Contains(find(m, j.ID).Error, "archive directory") || len(e.runner.requests()) != 0 {
+		t.Fatalf("error %q, runs %d", find(m, j.ID).Error, len(e.runner.requests()))
 	}
 }

@@ -1,11 +1,11 @@
-{{define "index" -}}
+{{define "top" -}}
 <!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="htmx-config" content='{"includeIndicatorStyles":false,"allowEval":false}'>
-<title>ukai</title>
+<title>{{if eq .Page "subs"}}Subscriptions · {{else if eq .Page "notice"}}{{.Title}} · {{end}}ukai</title>
 <link rel="icon" href="{{asset "favicon.svg"}}">
 <link rel="stylesheet" href="{{asset "style.css"}}">
 <script src="{{asset "mode.js"}}"></script>
@@ -13,87 +13,105 @@
 <script src="{{asset "app.js"}}" defer></script>
 </head>
 <body>
-<main>
-<header>
-  <img src="{{asset "favicon.svg"}}" alt="" width="40" height="40">
-  <h1>ukai</h1>
+<header class="topbar">
+  <div class="wrap topbar-in">
+    <a class="brand" href="/"><img src="{{asset "favicon.svg"}}" alt="" width="30" height="30"><span>ukai</span></a>
+    {{if ne .Page "notice"}}<nav class="tabs" aria-label="Pages">
+      <a href="/"{{if eq .Page ""}} aria-current="page"{{end}}>Downloads</a>
+      <a href="/subs"{{if eq .Page "subs"}} aria-current="page"{{end}}>Subscriptions</a>
+    </nav>{{end}}
+    <button type="button" id="mode-toggle" class="icon-btn" hidden>
+      <svg class="i-sun" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="4.2"/><path d="M12 2.5v2.3M12 19.2v2.3M2.5 12h2.3M19.2 12h2.3M5.3 5.3l1.6 1.6M17.1 17.1l1.6 1.6M5.3 18.7l1.6-1.6M17.1 6.9l1.6-1.6"/></svg>
+      <svg class="i-moon" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 14.6A8.2 8.2 0 0 1 9.4 4a8.2 8.2 0 1 0 10.6 10.6z"/></svg>
+    </button>
+    {{with .User}}<div class="account">
+      <span class="who" title="Signed in as {{.Name}}"><span class="face" aria-hidden="true">{{.Initial}}{{with .Avatar}}<img src="{{.}}" alt="" width="28" height="28">{{end}}</span><span class="name">{{.Name}}</span></span>
+      <a class="icon-btn" href="{{.LogoutURL}}" title="Sign out" aria-label="Sign out"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 4h3a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2h-3M10 8l-4 4 4 4M6 12h10"/></svg></a>
+    </div>{{end}}
+  </div>
 </header>
+<main class="wrap">
+{{- end}}
 
-<form class="submit" method="post" action="/jobs" hx-post="/jobs" hx-target="#jobs" hx-swap="outerHTML" hx-include="#filter" hx-sync="#jobs:replace">
-  <label for="url">Video URL <span class="hint">one per line for several</span></label>
-  <div class="row">
-    {{template "urlbox" .URLBox}}
-    <button type="submit">Download</button>
-  </div>
-  <div class="lookup">
-    <button type="submit" class="secondary" formaction="/probe" hx-post="/probe" hx-target="#options" hx-swap="outerHTML" hx-indicator="#looking" hx-disabled-elt="this">Show qualities</button>
-    <span id="looking" class="indicator" role="status">Asking yt-dlp…</span>
-  </div>
-  {{template "options" .Options}}
-  {{with .Error}}<p class="error" role="alert">{{.}}</p>{{end}}
-</form>
-
-<form id="filter" class="filter" method="get" action="/" hx-get="/jobs" hx-target="#jobs" hx-swap="outerHTML" hx-trigger="input changed delay:300ms from:#q, change" hx-sync="#jobs:replace">
-  <input id="q" name="q" type="search" placeholder="Search title or uploader" aria-label="Search title or uploader" value="{{.Filter.Q}}">
-  <select name="show" aria-label="Kind">
-    <option value="">All kinds</option>
-    <option value="video"{{if eq .Filter.Show "video"}} selected{{end}}>Video</option>
-    <option value="audio"{{if eq .Filter.Show "audio"}} selected{{end}}>Audio</option>
-  </select>
-  <select name="state" aria-label="State">
-    <option value="">All states</option>
-    <option value="active"{{if eq .Filter.State "active"}} selected{{end}}>In progress</option>
-    <option value="done"{{if eq .Filter.State "done"}} selected{{end}}>Done</option>
-    <option value="failed"{{if eq .Filter.State "failed"}} selected{{end}}>Failed or canceled</option>
-  </select>
-  <select name="order" aria-label="Order">
-    <option value="">Newest first</option>
-    <option value="oldest"{{if eq .Filter.Order "oldest"}} selected{{end}}>Oldest first</option>
-  </select>
-  <noscript><button type="submit" class="secondary">Apply</button></noscript>
-</form>
-
-{{template "jobs" .List}}
+{{define "bottom" -}}
 </main>
-<footer>ukai {{.Version}}</footer>
-<button type="button" id="mode-toggle" class="mode-toggle" hidden>
-<svg class="i-sun" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="4.2"/><path d="M12 2.5v2.3M12 19.2v2.3M2.5 12h2.3M19.2 12h2.3M5.3 5.3l1.6 1.6M17.1 17.1l1.6 1.6M5.3 18.7l1.6-1.6M17.1 6.9l1.6-1.6"/></svg>
-<svg class="i-moon" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 14.6A8.2 8.2 0 0 1 9.4 4a8.2 8.2 0 1 0 10.6 10.6z"/></svg>
-</button>
+<footer class="wrap">ukai {{.Version}}</footer>
 </body>
 </html>
 {{- end}}
 
+{{define "index" -}}
+{{template "top" .}}
+<form class="card compose submit" method="post" action="/jobs" hx-post="/jobs" hx-target="#jobs" hx-swap="outerHTML" hx-include="#filter" hx-sync="#jobs:replace">
+  <label for="url" class="sr-only">Video URL</label>
+  <div class="compose-main">
+    {{template "urlbox" .URLBox}}
+    <button type="submit" class="primary">Download</button>
+  </div>
+  <div class="compose-bar">
+    {{template "options" .Options}}
+    <button type="submit" class="link" formaction="/probe" hx-post="/probe" hx-target="#options" hx-swap="outerHTML" hx-indicator="#looking" hx-disabled-elt="this">Show qualities</button>
+    <span id="looking" class="indicator" role="status">Asking yt-dlp…</span>
+    <span class="hint">Enter downloads, Shift+Enter adds a line for another URL</span>
+  </div>
+  {{with .Error}}<p class="error" role="alert">{{.}}</p>{{end}}
+</form>
+
+<form id="filter" class="toolbar" method="get" action="/" hx-get="/jobs" hx-target="#jobs" hx-swap="outerHTML" hx-trigger="input changed delay:300ms from:#q, change" hx-sync="#jobs:replace">
+  <label class="search">
+    <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
+    <input id="q" name="q" type="search" placeholder="Search title, uploader or URL" aria-label="Search title, uploader or URL" value="{{.Filter.Q}}">
+  </label>
+  <div class="segmented" role="radiogroup" aria-label="Kind">
+    <label><input type="radio" name="show" value=""{{if eq .Filter.Show ""}} checked{{end}}><span>All</span></label>
+    <label><input type="radio" name="show" value="video"{{if eq .Filter.Show "video"}} checked{{end}}><span>Video</span></label>
+    <label><input type="radio" name="show" value="audio"{{if eq .Filter.Show "audio"}} checked{{end}}><span>Audio</span></label>
+  </div>
+  <div class="chips" role="radiogroup" aria-label="State">
+    <label><input type="radio" name="state" value=""{{if eq .Filter.State ""}} checked{{end}}><span>All <b id="n-all">{{.List.Counts.All}}</b></span></label>
+    <label><input type="radio" name="state" value="active"{{if eq .Filter.State "active"}} checked{{end}}><span>In progress <b id="n-active">{{.List.Counts.Active}}</b></span></label>
+    <label><input type="radio" name="state" value="done"{{if eq .Filter.State "done"}} checked{{end}}><span>Done <b id="n-done">{{.List.Counts.Done}}</b></span></label>
+    <label><input type="radio" name="state" value="failed"{{if eq .Filter.State "failed"}} checked{{end}}><span>Failed <b id="n-failed">{{.List.Counts.Failed}}</b></span></label>
+  </div>
+  <select name="order" aria-label="Order">
+    <option value="">Newest first</option>
+    <option value="oldest"{{if eq .Filter.Order "oldest"}} selected{{end}}>Oldest first</option>
+  </select>
+  <noscript><button type="submit" class="ghost">Apply</button></noscript>
+</form>
+
+{{template "jobs" .List}}
+{{template "bottom" .}}
+{{- end}}
+
 {{define "options" -}}
-<fieldset id="options"{{if .OOB}} hx-swap-oob="true"{{end}}>
-  <legend>Save as</legend>
+<fieldset id="options" class="options"{{if .OOB}} hx-swap-oob="true"{{end}}>
+  <legend class="sr-only">Save as</legend>
   <input type="hidden" name="probed_url" value="{{.ProbedURL}}">
-  <div class="choice">
-    <label><input type="radio" name="kind" value="video"{{if ne .Kind "audio"}} checked{{end}}> Video</label>
-    <select name="video_quality" aria-label="Video quality">
-      <option value="best"{{if eq .VideoQuality "best"}} selected{{end}}>Best</option>
-      {{- with .Heights}}
-      <optgroup label="Up to">{{range .}}<option value="{{.Value}}"{{if eq .Value $.VideoQuality}} selected{{end}}>{{.Label}}</option>{{end}}</optgroup>
-      {{- end}}
-    </select>
+  <div class="segmented" role="radiogroup" aria-label="Save as">
+    <label><input type="radio" name="kind" value="video"{{if ne .Kind "audio"}} checked{{end}}><span>Video</span></label>
+    <label><input type="radio" name="kind" value="audio"{{if eq .Kind "audio"}} checked{{end}}><span>Audio</span></label>
   </div>
-  <div class="choice">
-    <label><input type="radio" name="kind" value="audio"{{if eq .Kind "audio"}} checked{{end}}> Audio</label>
-    <select name="audio_quality" aria-label="Audio quality">
-      <option value="best"{{if eq .AudioQuality "best"}} selected{{end}}>Best (original)</option>
-      {{- with .Formats}}
-      <optgroup label="Original format">{{range .}}<option value="{{.Value}}"{{if eq .Value $.AudioQuality}} selected{{end}}>{{.Label}}</option>{{end}}</optgroup>
-      {{- end}}
-      <optgroup label="Convert to MP3">{{range .MP3}}<option value="{{.Value}}"{{if eq .Value $.AudioQuality}} selected{{end}}>{{.Label}}</option>{{end}}</optgroup>
-    </select>
-  </div>
+  <select name="video_quality" class="q-video" aria-label="Video quality">
+    <option value="best"{{if eq .VideoQuality "best"}} selected{{end}}>Best</option>
+    {{- with .Heights}}
+    <optgroup label="Up to">{{range .}}<option value="{{.Value}}"{{if eq .Value $.VideoQuality}} selected{{end}}>{{.Label}}</option>{{end}}</optgroup>
+    {{- end}}
+  </select>
+  <select name="audio_quality" class="q-audio" aria-label="Audio quality">
+    <option value="best"{{if eq .AudioQuality "best"}} selected{{end}}>Best (original)</option>
+    {{- with .Formats}}
+    <optgroup label="Original format">{{range .}}<option value="{{.Value}}"{{if eq .Value $.AudioQuality}} selected{{end}}>{{.Label}}</option>{{end}}</optgroup>
+    {{- end}}
+    <optgroup label="Convert to MP3">{{range .MP3}}<option value="{{.Value}}"{{if eq .Value $.AudioQuality}} selected{{end}}>{{.Label}}</option>{{end}}</optgroup>
+  </select>
   {{with .Title}}<p class="probed">Qualities of {{.}}</p>{{end}}
   {{with .Error}}<p class="error" role="alert">{{.}}</p>{{end}}
 </fieldset>
 {{- end}}
 
 {{define "urlbox" -}}
-<textarea id="url" name="url" rows="1" required autocomplete="off" spellcheck="false" placeholder="https://"{{if .OOB}} hx-swap-oob="true"{{end}}>{{.Value}}</textarea>
+<textarea id="url" name="url" rows="1" required autocomplete="off" spellcheck="false" placeholder="Paste a video URL, or several, one per line"{{if .OOB}} hx-swap-oob="true"{{end}}>{{.Value}}</textarea>
 {{- end}}
 
 {{define "partial" -}}

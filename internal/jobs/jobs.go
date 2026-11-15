@@ -52,7 +52,10 @@ type Options struct {
 	DownloadDir string
 	// TempRoot holds one directory of partial files per job.
 	TempRoot string
-	Log      *slog.Logger
+	// ArchiveDir holds one yt-dlp download archive per subscription,
+	// <ArchiveDir>/<subscription ID>.txt. Empty turns archives off.
+	ArchiveDir string
+	Log        *slog.Logger
 	// Now returns the current time. Nil means time.Now.
 	Now func() time.Time
 }
@@ -106,6 +109,10 @@ type Manager struct {
 	opt Options
 	log *slog.Logger
 	now func() time.Time
+
+	// onFinish, when set, hears about every job that ends done, failed or
+	// canceled. It is called without the lock held.
+	onFinish func(store.Job)
 
 	mu      sync.Mutex
 	jobs    []*store.Job // newest first
@@ -164,6 +171,12 @@ func New(opt Options) (*Manager, error) {
 		}
 		seen[j.ID] = true
 		was[j.ID] = j.State
+		if j.Sub != "" && (!validID.MatchString(j.Sub) || !ValidFolder(j.Folder)) {
+			// A link that names no plain directory or archive is dropped, so it
+			// cannot steer files or the archive outside their directories.
+			m.log.Warn("dropping a saved job's bad subscription link", "job", j.ID)
+			j.Sub, j.SubName, j.Folder = "", "", ""
+		}
 		if j.State == store.Running {
 			j.State = store.Queued
 			j.StartedAt = time.Time{}
@@ -212,8 +225,33 @@ func (m *Manager) removeStaleTemp() {
 	}
 }
 
+// SubRef ties a job to the subscription that queued it.
+type SubRef struct {
+	ID, Name string
+	// Folder is one directory name under the download directory.
+	Folder string
+}
+
 // Submit queues a download of rawURL. An empty quality means the best.
 func (m *Manager) Submit(rawURL string, kind store.Kind, quality string) (store.Job, error) {
+	return m.submit(rawURL, kind, quality, SubRef{})
+}
+
+// SubmitSub queues a download for a subscription. Its files go to the
+// subscription's folder and are recorded in its download archive.
+func (m *Manager) SubmitSub(rawURL string, kind store.Kind, quality string, ref SubRef) (store.Job, error) {
+	if ref.ID == "" || !validID.MatchString(ref.ID) || !ValidFolder(ref.Folder) {
+		return store.Job{}, errors.New("jobs: a subscription job needs a valid subscription ID and folder")
+	}
+	return m.submit(rawURL, kind, quality, ref)
+}
+
+// ValidFolder reports whether name is one plain directory name.
+func ValidFolder(name string) bool {
+	return name != "" && name != "." && name != ".." && !strings.ContainsAny(name, "/\\\x00") && filepath.IsLocal(name)
+}
+
+func (m *Manager) submit(rawURL string, kind store.Kind, quality string, ref SubRef) (store.Job, error) {
 	u, err := CheckURL(rawURL)
 	if err != nil {
 		return store.Job{}, err
@@ -228,7 +266,8 @@ func (m *Manager) Submit(rawURL string, kind store.Kind, quality string) (store.
 		return store.Job{}, ErrBadQuality
 	}
 	now := m.now()
-	j := &store.Job{ID: newID(now), URL: u, Kind: kind, Quality: quality, State: store.Queued, CreatedAt: now}
+	j := &store.Job{ID: newID(now), URL: u, Kind: kind, Quality: quality, State: store.Queued, CreatedAt: now,
+		Sub: ref.ID, SubName: ref.Name, Folder: ref.Folder}
 
 	m.mu.Lock()
 	// Restore both lists if the save fails: the trim may have dropped an old
@@ -245,7 +284,11 @@ func (m *Manager) Submit(rawURL string, kind store.Kind, quality string) (store.
 	}
 	out := *j
 	m.mu.Unlock()
-	m.log.Info("job queued", "job", out.ID, "url", out.URL, "kind", out.Kind, "quality", out.Quality)
+	if out.Sub != "" {
+		m.log.Info("job queued", "job", out.ID, "url", out.URL, "kind", out.Kind, "quality", out.Quality, "sub", out.SubName)
+	} else {
+		m.log.Info("job queued", "job", out.ID, "url", out.URL, "kind", out.Kind, "quality", out.Quality)
+	}
 
 	select {
 	case m.wake <- struct{}{}:
@@ -277,10 +320,21 @@ func newID(now time.Time) string {
 // Cancel stops a queued or running job.
 func (m *Manager) Cancel(id string) error {
 	m.mu.Lock()
-	defer m.mu.Unlock()
+	ended, err := m.cancelLocked(id)
+	hook := m.onFinish
+	m.mu.Unlock()
+	if ended != nil && hook != nil {
+		hook(*ended)
+	}
+	return err
+}
+
+// cancelLocked cancels a job. A queued job ends here and is returned; a
+// running one ends when its worker sees the cancel.
+func (m *Manager) cancelLocked(id string) (*store.Job, error) {
 	j := m.findLocked(id)
 	if j == nil {
-		return ErrNotFound
+		return nil, ErrNotFound
 	}
 	switch j.State {
 	case store.Queued:
@@ -293,20 +347,22 @@ func (m *Manager) Cancel(id string) error {
 		if err := m.saveLocked(); err != nil {
 			*j = prev
 			m.log.Error("cannot save jobs", "err", err)
-			return ErrSave
+			return nil, ErrSave
 		}
 		m.pending = slices.DeleteFunc(m.pending, func(p string) bool { return p == id })
 		m.log.Info("job canceled", "job", id, "url", j.URL, "was", store.Queued)
+		ended := *j
 		m.trimLocked()
+		return &ended, nil
 	case store.Running:
 		// The worker records the result when yt-dlp has stopped.
 		if cancel := m.cancels[id]; cancel != nil {
 			cancel()
 		}
 	default:
-		return ErrNotActive
+		return nil, ErrNotActive
 	}
-	return nil
+	return nil, nil
 }
 
 // Retry queues a failed or canceled job again with the same URL, kind and
@@ -520,6 +576,12 @@ func (m *Manager) take(ctx context.Context) (string, context.Context, context.Ca
 			OutDir:  m.opt.DownloadDir,
 			TempDir: filepath.Join(m.opt.TempRoot, id),
 		}
+		if validID.MatchString(j.Sub) && ValidFolder(j.Folder) {
+			req.Subdir = j.Folder
+			if m.opt.ArchiveDir != "" {
+				req.Archive = filepath.Join(m.opt.ArchiveDir, j.Sub+".txt")
+			}
+		}
 		return id, jctx, cancel, req, true
 	}
 	return "", nil, nil, ytdlp.Request{}, false
@@ -527,7 +589,10 @@ func (m *Manager) take(ctx context.Context) (string, context.Context, context.Ca
 
 func (m *Manager) run(ctx, jctx context.Context, cancel context.CancelFunc, id string, req ytdlp.Request) {
 	defer cancel()
-	err := os.MkdirAll(req.TempDir, 0o750)
+	err := checkPlaces(req)
+	if err == nil {
+		err = os.MkdirAll(req.TempDir, 0o750)
+	}
 	if err == nil {
 		err = m.opt.Runner.Run(jctx, req, ytdlp.Handler{
 			Meta: func(md ytdlp.Meta) {
@@ -591,11 +656,49 @@ func (m *Manager) run(ctx, jctx context.Context, cancel context.CancelFunc, id s
 			m.log.Warn("job failed", "job", id, "url", j.URL, "took", took, "err", j.Error)
 		}
 	}
+	var ended *store.Job
+	if j := m.findLocked(id); j != nil && !j.Active() {
+		c := *j
+		ended = &c
+	}
 	delete(m.live, id)
 	delete(m.cancels, id)
 	m.trimLocked()
 	m.saveOrLog()
+	hook := m.onFinish
 	m.mu.Unlock()
+	if ended != nil && hook != nil {
+		hook(*ended)
+	}
+}
+
+// SetOnFinish registers fn to hear about every job that ends done, failed or
+// canceled.
+func (m *Manager) SetOnFinish(fn func(store.Job)) {
+	m.mu.Lock()
+	m.onFinish = fn
+	m.mu.Unlock()
+}
+
+// checkPlaces refuses a subscription download whose folder or archive is not
+// a plain directory or file: a symbolic link there could point yt-dlp's
+// writes outside the download or data directory. A missing one is fine;
+// yt-dlp creates it.
+func checkPlaces(req ytdlp.Request) error {
+	if req.Subdir != "" {
+		if info, err := os.Lstat(filepath.Join(req.OutDir, req.Subdir)); err == nil && !info.IsDir() {
+			return fmt.Errorf("the subscription folder %s is not a plain directory", req.Subdir)
+		}
+	}
+	if req.Archive != "" {
+		if info, err := os.Lstat(filepath.Dir(req.Archive)); err == nil && !info.IsDir() {
+			return errors.New("the download archive directory is not a plain directory")
+		}
+		if info, err := os.Lstat(req.Archive); err == nil && !info.Mode().IsRegular() {
+			return errors.New("the subscription's download archive is not a plain file")
+		}
+	}
+	return nil
 }
 
 // filesAttr names the one file a job usually makes, or counts them.
