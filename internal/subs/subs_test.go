@@ -229,7 +229,7 @@ func TestAddPointsAChannelAtItsVideos(t *testing.T) {
 
 func TestNewOnlyNotesWhatIsThereAndQueuesWhatComesLater(t *testing.T) {
 	e := newEnv(t)
-	e.lister.set(videos, ytdlp.Listing{Channel: "Band", Title: "Band - Videos", Entries: entries("c", "b", "a")})
+	e.lister.set(videos, ytdlp.Listing{Channel: "Band", Title: "Band - Videos", Avatar: "https://yt3.example/band=s88", Entries: entries("c", "b", "a")})
 	m := e.manager()
 	run(t, m)
 	start := time.Now().Add(-time.Second)
@@ -246,7 +246,7 @@ func TestNewOnlyNotesWhatIsThereAndQueuesWhatComesLater(t *testing.T) {
 		t.Fatalf("archive = %q", data)
 	}
 	v := m.List()[0]
-	if !v.Ready || v.Name != "Band" || v.Folder != "Band" || e.lister.limits[0] != 0 {
+	if !v.Ready || v.Name != "Band" || v.Folder != "Band" || v.Avatar != "https://yt3.example/band=s88" || e.lister.limits[0] != 0 {
 		t.Fatalf("after the first check: %+v, limits %v", v.Sub, e.lister.limits)
 	}
 

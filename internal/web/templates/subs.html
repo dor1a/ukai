@@ -55,7 +55,7 @@
   {{if .Subs}}<ol class="rows">
   {{range .Subs}}
     <li class="row sub{{if .Paused}} paused{{end}}">
-      <div class="avatar tone-{{.Tone}}" aria-hidden="true">{{.Initial}}</div>
+      {{if .Avatar}}<img class="avatar" src="{{.Avatar}}" alt="" width="44" height="44" loading="lazy">{{else}}<div class="avatar tone-{{.Tone}}" aria-hidden="true">{{.Initial}}</div>{{end}}
       <div class="main">
         <a class="title" href="{{.URL}}" rel="noopener noreferrer" target="_blank">{{.Name}}</a>
         <div class="meta"><span>{{.Detail}}</span></div>

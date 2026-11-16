@@ -42,8 +42,8 @@ type Jobs interface {
 	Submit(rawURL string, kind store.Kind, quality string) (store.Job, error)
 	Cancel(id string) error
 	Retry(id string) error
-	Remove(id string) error
-	ClearFinished() (int, error)
+	Remove(id string, deleteFiles bool) error
+	ClearFinished(deleteFiles bool) (int, error)
 	Get(id string) (jobs.View, bool)
 	List() []jobs.View
 	UnsavedSince() time.Time
@@ -180,13 +180,13 @@ type listData struct {
 	// refreshes it with the same filter.
 	Filter filter
 	Poll   string
-	// Total counts every job, Finished the ones that can be removed.
-	Total    int
-	Finished int
-	// Counts are the jobs that match the search and kind, by state. The
-	// state chips show them; CountsOOB sends them along with a list fragment.
-	Counts    counts
-	CountsOOB bool
+	// Finished counts the jobs that can be removed, and FinishedFiles the
+	// finished ones with downloaded files.
+	Finished      int
+	FinishedFiles int
+	// Counts are the jobs that match the search and kind, by state, for the
+	// state chips at the head of the list.
+	Counts counts
 	// Unsaved is when saving the job list started failing, empty while saved.
 	Unsaved string
 }
@@ -424,7 +424,7 @@ func (f filter) match(v jobs.View) bool {
 
 func (s *Server) listData(f filter, errMsg string) listData {
 	views := s.jobs.List()
-	d := listData{Jobs: make([]row, 0, len(views)), Error: errMsg, Filter: f, Poll: "/jobs", Total: len(views)}
+	d := listData{Jobs: make([]row, 0, len(views)), Error: errMsg, Filter: f, Poll: "/jobs"}
 	if q := f.query(); q != "" {
 		d.Poll += "?" + q
 	}
@@ -438,6 +438,9 @@ func (s *Server) listData(f filter, errMsg string) listData {
 			d.Active = true
 		} else {
 			d.Finished++
+			if len(v.Files) > 0 {
+				d.FinishedFiles++
+			}
 		}
 		if facet.match(v) {
 			d.Counts.All++
@@ -629,15 +632,7 @@ func (s *Server) index(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) list(w http.ResponseWriter, r *http.Request) {
-	s.render(w, http.StatusOK, "jobs", s.fragment(readFilter(r), ""))
-}
-
-// fragment is the list as an HTMX response: the state counts in the filter
-// bar outside it come along out of band.
-func (s *Server) fragment(f filter, errMsg string) listData {
-	d := s.listData(f, errMsg)
-	d.CountsOOB = true
-	return d
+	s.render(w, http.StatusOK, "jobs", s.listData(readFilter(r), ""))
 }
 
 // splitURLs returns the non-empty lines of raw, trimmed.
@@ -706,7 +701,7 @@ func (s *Server) submit(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case isHTMX(r) && msg != "" && queued == 0:
 		w.Header().Set("X-Ukai-Error", "1")
-		s.render(w, http.StatusOK, "jobs", s.fragment(lf, msg))
+		s.render(w, http.StatusOK, "jobs", s.listData(lf, msg))
 	case isHTMX(r) && msg != "":
 		// Part of the batch was queued: keep the choices, and leave only the
 		// URLs that were not queued in the box.
@@ -714,7 +709,7 @@ func (s *Server) submit(w http.ResponseWriter, r *http.Request) {
 		s.render(w, http.StatusOK, "partial", struct {
 			List listData
 			Box  urlBox
-		}{s.fragment(lf, msg), urlBox{Value: rest, OOB: true}})
+		}{s.listData(lf, msg), urlBox{Value: rest, OOB: true}})
 	case isHTMX(r):
 		// Queued: put the choices back to the defaults for the next URL, and
 		// keep the kind.
@@ -723,7 +718,7 @@ func (s *Server) submit(w http.ResponseWriter, r *http.Request) {
 		s.render(w, http.StatusOK, "submitted", struct {
 			List    listData
 			Options optionsData
-		}{s.fragment(lf, msg), o})
+		}{s.listData(lf, msg), o})
 	case msg != "":
 		box := f.URL
 		if queued > 0 {
@@ -855,16 +850,24 @@ func (s *Server) retry(w http.ResponseWriter, r *http.Request) {
 	s.act(w, r, func() error { return s.jobs.Retry(r.PathValue("id")) })
 }
 
+// remove takes one finished job off the list, and deletes its files too when
+// the form posts files=1.
 func (s *Server) remove(w http.ResponseWriter, r *http.Request) {
-	s.act(w, r, func() error { return s.jobs.Remove(r.PathValue("id")) })
+	s.act(w, r, func() error { return s.jobs.Remove(r.PathValue("id"), deleteFiles(r)) })
 }
 
+// clear takes every finished job off the list, and deletes their files too
+// when the form posts files=1.
 func (s *Server) clear(w http.ResponseWriter, r *http.Request) {
 	s.act(w, r, func() error {
-		_, err := s.jobs.ClearFinished()
+		_, err := s.jobs.ClearFinished(deleteFiles(r))
 		return err
 	})
 }
+
+// deleteFiles reports whether a posted form asks for the files to go too.
+// act has parsed the form already.
+func deleteFiles(r *http.Request) bool { return r.PostForm.Get("files") == "1" }
 
 // act runs one job action from a posted button and shows the list again,
 // keeping the filter the page posted along.
@@ -879,7 +882,7 @@ func (s *Server) act(w http.ResponseWriter, r *http.Request, do func() error) {
 	msg := s.userMessage(err)
 	switch {
 	case isHTMX(r):
-		s.render(w, http.StatusOK, "jobs", s.fragment(f, msg))
+		s.render(w, http.StatusOK, "jobs", s.listData(f, msg))
 	case errors.Is(err, jobs.ErrNotFound):
 		s.render(w, http.StatusNotFound, "index", s.page(r, pageData{List: s.listData(f, ""), Filter: f, Error: msg}))
 	case msg != "":
@@ -955,7 +958,7 @@ func (s *Server) userMessage(err error) string {
 		errors.Is(err, jobs.ErrNotFound), errors.Is(err, jobs.ErrNotActive),
 		errors.Is(err, jobs.ErrActive), errors.Is(err, jobs.ErrNoRetry):
 		return label(err.Error()) + "."
-	case errors.Is(err, jobs.ErrSave):
+	case errors.Is(err, jobs.ErrSave), errors.Is(err, jobs.ErrDelete):
 		return label(err.Error()) + ". See the ukai log."
 	default:
 		s.log.Error("request failed", "err", err)

@@ -118,3 +118,60 @@ document.addEventListener("htmx:afterRequest", function (event) {
     }
   }
 });
+
+// Removing a download or clearing the list asks first, in a dialog that
+// deletes the downloaded files unless "Keep the files" is checked. The forms
+// post files=1 only through it, so a form sent without scripts keeps them.
+// The dialog sits outside the job list, which refreshes while anything runs,
+// so it remembers the form by its address and finds it again on confirm.
+var removing = null;
+
+document.addEventListener("submit", function (event) {
+  var form = event.target;
+  if (!form.matches || !form.matches("form[data-remove]")) {
+    return;
+  }
+  if (form.getAttribute("data-confirmed") === "1") {
+    form.removeAttribute("data-confirmed");
+    return;
+  }
+  var dialog = document.getElementById("remove-dialog");
+  if (!dialog || !dialog.showModal) {
+    return;
+  }
+  event.preventDefault();
+  event.stopPropagation();
+  var files = parseInt(form.getAttribute("data-files"), 10) > 0;
+  removing = form.getAttribute("action");
+  dialog.querySelector("h2").textContent = form.getAttribute("data-heading");
+  dialog.querySelector(".what").textContent = form.getAttribute("data-what");
+  dialog.querySelector(".files").hidden = !files;
+  dialog.querySelector("input[name=keep]").checked = false;
+  dialog.querySelector("button[value=confirm]").textContent = form.getAttribute("data-action");
+  dialog.returnValue = "";
+  dialog.showModal();
+}, true);
+
+document.addEventListener("close", function (event) {
+  var dialog = event.target;
+  if (dialog.id !== "remove-dialog") {
+    return;
+  }
+  var action = removing;
+  removing = null;
+  if (dialog.returnValue !== "confirm" || !action) {
+    return;
+  }
+  var forms = document.querySelectorAll("form[data-remove]");
+  for (var i = 0; i < forms.length; i++) {
+    if (forms[i].getAttribute("action") === action) {
+      var keep = dialog.querySelector("input[name=keep]").checked;
+      var files = parseInt(forms[i].getAttribute("data-files"), 10) > 0;
+      forms[i].querySelector("input[name=files]").value = files && !keep ? "1" : "";
+      forms[i].setAttribute("data-confirmed", "1");
+      forms[i].requestSubmit();
+      return;
+    }
+  }
+}, true);
+

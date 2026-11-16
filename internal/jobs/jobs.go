@@ -21,6 +21,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"net/url"
 	"os"
@@ -95,6 +96,7 @@ var (
 	ErrNotActive  = errors.New("the job has already finished")
 	ErrActive     = errors.New("the job is still queued or running; cancel it first")
 	ErrNoRetry    = errors.New("only a failed or canceled job can be tried again")
+	ErrDelete     = errors.New("some downloaded files could not be deleted, so their jobs stay in the list")
 )
 
 const maxURLLength = 2048
@@ -403,8 +405,12 @@ func (m *Manager) Retry(id string) error {
 	return nil
 }
 
-// Remove takes a finished job off the list. Its files stay where they are.
-func (m *Manager) Remove(id string) error {
+// Remove takes a finished job off the list. Without deleteFiles its files
+// stay where they are. With deleteFiles it first checks that every file the
+// job names can be deleted safely, then deletes the ones no other listed job
+// names. When a check or a deletion fails, the job stays listed and Remove
+// returns ErrDelete.
+func (m *Manager) Remove(id string, deleteFiles bool) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	j := m.findLocked(id)
@@ -414,6 +420,22 @@ func (m *Manager) Remove(id string) error {
 	case j.Active():
 		return ErrActive
 	}
+	deleted := 0
+	if deleteFiles && len(j.Files) > 0 {
+		root, err := m.openDownloads()
+		if err != nil {
+			return ErrDelete
+		}
+		defer root.Close()
+		if !m.checkFiles(root, j) {
+			return ErrDelete
+		}
+		n, ok := m.removeFiles(root, j, m.namedLocked(func(x *store.Job) bool { return x != j }))
+		if !ok {
+			return ErrDelete
+		}
+		deleted = n
+	}
 	prevJobs := slices.Clone(m.jobs)
 	m.jobs = slices.DeleteFunc(m.jobs, func(x *store.Job) bool { return x == j })
 	if err := m.saveLocked(); err != nil {
@@ -421,28 +443,188 @@ func (m *Manager) Remove(id string) error {
 		m.log.Error("cannot save jobs", "err", err)
 		return ErrSave
 	}
-	m.log.Info("job removed", "job", id, "url", j.URL, "was", j.State)
+	if deleteFiles {
+		m.log.Info("job removed", "job", id, "url", j.URL, "was", j.State, "files_deleted", deleted)
+	} else {
+		m.log.Info("job removed", "job", id, "url", j.URL, "was", j.State)
+	}
 	return nil
 }
 
 // ClearFinished takes every finished job off the list and returns how many.
-// Their files stay where they are.
-func (m *Manager) ClearFinished() (int, error) {
+// Without deleteFiles their files stay where they are. With deleteFiles it
+// first checks every finished job's files; a job that fails the check stays
+// listed, and so do all the files it names. It then deletes the files of the
+// others that no job staying on the list names. A job whose files cannot all
+// be deleted stays too, and ClearFinished returns ErrDelete after removing the
+// rest.
+func (m *Manager) ClearFinished(deleteFiles bool) (int, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	stays := map[*store.Job]bool{}
+	for _, j := range m.jobs {
+		if j.Active() {
+			stays[j] = true
+		}
+	}
+	deleted, failed := 0, false
+	if deleteFiles {
+		var root *os.Root
+		var rootErr error
+		for _, j := range m.jobs {
+			if stays[j] || len(j.Files) == 0 {
+				continue
+			}
+			if root == nil && rootErr == nil {
+				if root, rootErr = m.openDownloads(); root != nil {
+					defer root.Close()
+				}
+			}
+			if rootErr != nil || !m.checkFiles(root, j) {
+				stays[j] = true
+				failed = true
+			}
+		}
+		if root != nil {
+			keep := m.namedLocked(func(x *store.Job) bool { return stays[x] })
+			for _, j := range m.jobs {
+				if stays[j] {
+					continue
+				}
+				n, ok := m.removeFiles(root, j, keep)
+				deleted += n
+				if !ok {
+					stays[j] = true
+					failed = true
+				}
+			}
+		}
+	}
 	prevJobs := slices.Clone(m.jobs)
-	m.jobs = slices.DeleteFunc(m.jobs, func(x *store.Job) bool { return !x.Active() })
+	m.jobs = slices.DeleteFunc(m.jobs, func(x *store.Job) bool { return !stays[x] })
 	n := len(prevJobs) - len(m.jobs)
-	if n == 0 {
-		return 0, nil
+	if n > 0 {
+		if err := m.saveLocked(); err != nil {
+			m.jobs = prevJobs
+			m.log.Error("cannot save jobs", "err", err)
+			return 0, ErrSave
+		}
 	}
-	if err := m.saveLocked(); err != nil {
-		m.jobs = prevJobs
-		m.log.Error("cannot save jobs", "err", err)
-		return 0, ErrSave
+	switch {
+	case deleteFiles && (n > 0 || deleted > 0):
+		m.log.Info("finished jobs removed", "count", n, "files_deleted", deleted)
+	case n > 0:
+		m.log.Info("finished jobs removed", "count", n)
 	}
-	m.log.Info("finished jobs removed", "count", n)
+	if failed {
+		return n, ErrDelete
+	}
 	return n, nil
+}
+
+// namedLocked returns the files named by the jobs for which stays reports
+// true.
+func (m *Manager) namedLocked(stays func(*store.Job) bool) map[string]bool {
+	named := map[string]bool{}
+	for _, j := range m.jobs {
+		if stays(j) {
+			for _, f := range j.Files {
+				named[f] = true
+			}
+		}
+	}
+	return named
+}
+
+// openDownloads opens the download directory for deleting files. Every lookup
+// and removal goes through the returned os.Root, so nothing outside the
+// directory can be reached.
+func (m *Manager) openDownloads() (*os.Root, error) {
+	root, err := os.OpenRoot(m.opt.DownloadDir)
+	if err != nil {
+		// A missing download directory may be an unmounted volume whose files
+		// still exist, so nothing is deleted and the jobs stay.
+		m.log.Warn("cannot open the download directory to delete files", "dir", m.opt.DownloadDir, "err", err)
+	}
+	return root, err
+}
+
+// errNotPlain marks a path that is not a plain file in plain directories.
+var errNotPlain = errors.New("not a plain file in plain directories")
+
+// lstatPlain looks rel up without following a symbolic link anywhere on the
+// way: every directory above it must be a real directory, and the result
+// describes rel itself. A link inside the download directory could otherwise
+// lead to someone else's file there.
+func lstatPlain(root *os.Root, rel string) (fs.FileInfo, error) {
+	parts := strings.Split(rel, string(filepath.Separator))
+	for i := 1; i < len(parts); i++ {
+		info, err := root.Lstat(filepath.Join(parts[:i]...))
+		if err != nil {
+			return nil, err
+		}
+		if !info.IsDir() {
+			return nil, errNotPlain
+		}
+	}
+	info, err := root.Lstat(rel)
+	if err == nil && !info.Mode().IsRegular() {
+		return info, errNotPlain
+	}
+	return info, err
+}
+
+// checkFiles reports whether every file j names could be deleted safely: its
+// name is a path inside the download directory and, if it is still there, a
+// plain file reached through plain directories. A file already gone passes.
+// It logs every file that fails.
+func (m *Manager) checkFiles(root *os.Root, j *store.Job) bool {
+	ok := true
+	for _, name := range j.Files {
+		rel := filepath.FromSlash(name)
+		if !filepath.IsLocal(rel) {
+			m.log.Warn("file not deleted: its name is not a path inside the download directory", "job", j.ID, "file", name)
+			ok = false
+			continue
+		}
+		switch _, err := lstatPlain(root, rel); {
+		case err == nil, errors.Is(err, fs.ErrNotExist):
+		case errors.Is(err, errNotPlain):
+			m.log.Warn("file not deleted: it is not a plain file in plain directories", "job", j.ID, "file", name)
+			ok = false
+		default:
+			m.log.Warn("file not deleted", "job", j.ID, "file", name, "err", err)
+			ok = false
+		}
+	}
+	return ok
+}
+
+// removeFiles deletes the files of j, which passed checkFiles, that keep does
+// not name. It looks each one up again just before removing it and returns
+// how many went; a file already gone counts. It reports false when one could
+// not be deleted, and logs why.
+func (m *Manager) removeFiles(root *os.Root, j *store.Job, keep map[string]bool) (int, bool) {
+	deleted, ok := 0, true
+	for _, name := range j.Files {
+		if keep[name] {
+			m.log.Info("file kept: another listed job names it", "job", j.ID, "file", name)
+			continue
+		}
+		rel := filepath.FromSlash(name)
+		_, err := lstatPlain(root, rel)
+		if err == nil {
+			err = root.Remove(rel)
+		}
+		switch {
+		case err == nil, errors.Is(err, fs.ErrNotExist):
+			deleted++
+		default:
+			m.log.Warn("file not deleted", "job", j.ID, "file", name, "err", err)
+			ok = false
+		}
+	}
+	return deleted, ok
 }
 
 // Get returns a copy of one job.

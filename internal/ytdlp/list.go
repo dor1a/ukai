@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net/url"
 	"os/exec"
 	"strconv"
 	"strings"
@@ -26,8 +27,15 @@ type Listing struct {
 	// Title is the playlist or tab title, Channel the channel's name.
 	Title   string
 	Channel string
+	// Avatar is the channel's picture at avatarSize, or empty when yt-dlp
+	// reports none, as for a playlist or a site other than YouTube.
+	Avatar  string
 	Entries []Entry
 }
+
+// avatarSize is the edge in pixels asked of the channel picture: twice the
+// 44 pixel badge, for sharp high-density screens.
+const avatarSize = 88
 
 // Errors returned by List.
 var (
@@ -80,13 +88,34 @@ func (r Runner) List(ctx context.Context, url string, limit int) (Listing, error
 	return parseListing(out.Bytes())
 }
 
+// sizedAvatar returns an https picture URL at avatarSize. A Google image URL
+// carries its size after "=" (yt-dlp asks for the whole picture with "=s0"),
+// so that part is replaced. Anything that is not https is dropped.
+func sizedAvatar(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil || u.Scheme != "https" || u.Host == "" {
+		return ""
+	}
+	if base, _, ok := strings.Cut(u.Path, "="); ok {
+		u.Path = base + "=s" + strconv.Itoa(avatarSize)
+		u.RawPath = ""
+	}
+	return u.String()
+}
+
 func parseListing(data []byte) (Listing, error) {
 	var raw struct {
 		Type     string `json:"_type"`
 		Title    string `json:"title"`
 		Channel  string `json:"channel"`
 		Uploader string `json:"uploader"`
-		Entries  []struct {
+		// Thumbnails of a YouTube channel include its picture, whole, under
+		// the id avatar_uncropped.
+		Thumbnails []struct {
+			ID  string `json:"id"`
+			URL string `json:"url"`
+		} `json:"thumbnails"`
+		Entries []struct {
 			Type  string `json:"_type"`
 			Key   string `json:"ie_key"`
 			ID    string `json:"id"`
@@ -101,6 +130,12 @@ func parseListing(data []byte) (Listing, error) {
 		return Listing{}, ErrNotPlaylist
 	}
 	l := Listing{Title: raw.Title, Channel: raw.Channel}
+	for _, t := range raw.Thumbnails {
+		if t.ID == "avatar_uncropped" {
+			l.Avatar = sizedAvatar(t.URL)
+			break
+		}
+	}
 	if l.Channel == "" {
 		l.Channel = raw.Uploader
 	}

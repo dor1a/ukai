@@ -89,13 +89,13 @@ func TestRemoveAndClearFinished(t *testing.T) {
 	running, _ := m.Submit("https://example.com/block", store.KindVideo, "")
 	waitFor(t, "running", stateIs(m, running.ID, store.Running))
 
-	if err := m.Remove(running.ID); !errors.Is(err, ErrActive) {
+	if err := m.Remove(running.ID, false); !errors.Is(err, ErrActive) {
 		t.Fatalf("remove of a running job: %v, want ErrActive", err)
 	}
-	if err := m.Remove("nope"); !errors.Is(err, ErrNotFound) {
+	if err := m.Remove("nope", false); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("remove of an unknown job: %v, want ErrNotFound", err)
 	}
-	if err := m.Remove(done.ID); err != nil {
+	if err := m.Remove(done.ID, false); err != nil {
 		t.Fatal(err)
 	}
 	if _, ok := m.Get(done.ID); ok {
@@ -108,14 +108,14 @@ func TestRemoveAndClearFinished(t *testing.T) {
 		}
 	}
 
-	n, err := m.ClearFinished()
+	n, err := m.ClearFinished(false)
 	if err != nil || n != 1 {
 		t.Fatalf("clear = %d, %v; want 1, nil", n, err)
 	}
 	if list := m.List(); len(list) != 1 || list[0].ID != running.ID {
 		t.Fatalf("after clear: %+v, want only the running job", list)
 	}
-	if n, err := m.ClearFinished(); n != 0 || err != nil {
+	if n, err := m.ClearFinished(false); n != 0 || err != nil {
 		t.Fatalf("second clear = %d, %v; want 0, nil", n, err)
 	}
 	e.logs.want(t, "job removed", "was=done")
@@ -133,10 +133,10 @@ func TestRemoveAndClearRollBackWhenSaveFails(t *testing.T) {
 	stop()
 
 	fs.set(true)
-	if err := m.Remove(j.ID); !errors.Is(err, ErrSave) {
+	if err := m.Remove(j.ID, false); !errors.Is(err, ErrSave) {
 		t.Fatalf("remove err = %v, want ErrSave", err)
 	}
-	if n, err := m.ClearFinished(); n != 0 || !errors.Is(err, ErrSave) {
+	if n, err := m.ClearFinished(false); n != 0 || !errors.Is(err, ErrSave) {
 		t.Fatalf("clear = %d, %v; want 0, ErrSave", n, err)
 	}
 	if _, ok := m.Get(j.ID); !ok {

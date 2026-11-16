@@ -1,6 +1,7 @@
 package web
 
 import (
+	"fmt"
 	"net/http"
 	"net/url"
 	"os"
@@ -63,7 +64,7 @@ func TestListFilters(t *testing.T) {
 		}
 	}
 	b := do(h, "GET", "/jobs?q=nothing", nil, nil).Body.String()
-	if !strings.Contains(b, "No downloads match.") || !strings.Contains(b, "0 of 4 downloads") {
+	if !strings.Contains(b, "No downloads match.") || !strings.Contains(b, "All <b>0</b>") {
 		t.Errorf("empty filtered list:\n%s", b)
 	}
 }
@@ -97,6 +98,64 @@ func TestRowsOfferTheRightActions(t *testing.T) {
 	}
 	if strings.Contains(b, "/files/") || strings.Contains(b, "<audio") {
 		t.Error("files are linked although file serving is off")
+	}
+}
+
+func TestRemoveAndClearAskInADialog(t *testing.T) {
+	b := do(server(t, sampleJobs()), "GET", "/jobs", nil, nil).Body.String()
+	// Every remove form and the clear form go through the dialog, carry how
+	// many files they would delete, and never post files=1 by themselves.
+	for _, want := range []string{
+		`action="/jobs/j2/remove" hx-post="/jobs/j2/remove" hx-target="#jobs" hx-swap="outerHTML" hx-sync="#jobs:replace" data-remove data-heading="Remove this download?" data-what="Done song" data-files="1" data-action="Remove"`,
+		`action="/jobs/j1/remove" hx-post="/jobs/j1/remove" hx-target="#jobs" hx-swap="outerHTML" hx-sync="#jobs:replace" data-remove data-heading="Remove this download?" data-what="Canceled clip" data-files="0"`,
+		`data-remove data-heading="Clear 3 finished downloads?"`,
+		`data-files="1" data-action="Clear"`,
+	} {
+		if !strings.Contains(b, want) {
+			t.Errorf("list lacks %q", want)
+		}
+	}
+	if n, forms := strings.Count(b, `<input type="hidden" name="files" value="">`), strings.Count(b, "data-remove"); n != forms || n != 4 {
+		t.Errorf("%d empty files fields for %d dialog forms, want 4 each", n, forms)
+	}
+	if strings.Contains(b, `name="files" value="1"`) || strings.Contains(b, "hx-confirm") || strings.Contains(b, "remove-dialog") {
+		t.Errorf("the list posts files=1 by itself, keeps a browser confirm, or carries the dialog:\n%s", b)
+	}
+
+	page := do(server(t, sampleJobs()), "GET", "/", nil, nil).Body.String()
+	dialog := page[strings.Index(page, `<dialog id="remove-dialog"`):]
+	dialog = dialog[:strings.Index(dialog, "</dialog>")]
+	for _, want := range []string{`<form method="dialog">`, `<input type="checkbox" name="keep"> Keep the files`, `value="cancel"`, `value="confirm"`} {
+		if !strings.Contains(dialog, want) {
+			t.Errorf("dialog lacks %q:\n%s", want, dialog)
+		}
+	}
+	if strings.Index(page, `id="remove-dialog"`) < strings.Index(page, "</section>") {
+		t.Error("the dialog sits inside the job list, which refreshes")
+	}
+}
+
+func TestRemoveAndClearPassTheDeleteChoice(t *testing.T) {
+	j := sampleJobs()
+	h := server(t, j)
+	do(h, "POST", "/jobs/j2/remove", url.Values{"files": {"1"}}, htmx)
+	do(h, "POST", "/jobs/j1/remove", nil, htmx)
+	do(h, "POST", "/jobs/j3/remove", url.Values{"files": {"yes"}}, htmx)
+	do(h, "POST", "/jobs/clear", url.Values{"files": {"1"}}, htmx)
+	do(h, "POST", "/jobs/clear", nil, htmx)
+	if fmt.Sprint(j.removedFiles) != "[true false false]" || fmt.Sprint(j.clearedFiles) != "[true false]" {
+		t.Fatalf("removed with files %v, cleared with files %v", j.removedFiles, j.clearedFiles)
+	}
+	// The choice is read from the posted body only, not the query string.
+	do(h, "POST", "/jobs/j2/remove?files=1", nil, htmx)
+	if j.removedFiles[3] {
+		t.Error("files=1 in the query string deleted files")
+	}
+
+	j.actErr = jobs.ErrDelete
+	b := do(h, "POST", "/jobs/clear", url.Values{"files": {"1"}}, htmx).Body.String()
+	if !strings.Contains(b, "could not be deleted") || !strings.Contains(b, "See the ukai log.") {
+		t.Errorf("delete failure message missing:\n%s", b)
 	}
 }
 

@@ -255,14 +255,16 @@ button.small { padding: 3px 12px; font-size: 13px; }
   padding: 16px;
 }
 
-.compose { margin-bottom: 20px; }
+.compose { margin-bottom: 32px; }
 .compose-main { display: flex; gap: 10px; align-items: stretch; }
 .compose-main textarea, .compose-main input { flex: 1; }
 .compose-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-top: 12px; }
-.compose-bar .hint { margin-left: auto; }
+.compose-go { display: flex; align-items: center; gap: 12px; margin-left: auto; }
 
-.options { border: 0; padding: 0; margin: 0; display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
-.options > p { flex-basis: 100%; margin: 0; }
+/* The options lay out as part of the bar, so a message under them takes a
+   line of its own at the end instead of making the bar two rows tall. */
+.options { display: contents; }
+.options > p { flex-basis: 100%; order: 1; margin: 0; }
 .options:has(input[name="kind"][value="audio"]:checked) .q-video,
 .options:has(input[name="kind"][value="video"]:checked) .q-audio { display: none; }
 .probed { color: var(--muted); font-size: 14px; overflow-wrap: anywhere; }
@@ -286,7 +288,7 @@ button.small { padding: 3px 12px; font-size: 13px; }
 
 /* Lists */
 
-.list-head { display: flex; justify-content: space-between; align-items: center; margin: 4px 2px 8px; color: var(--muted); font-size: 14px; }
+.list-head { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 8px; margin: 4px 0 10px; color: var(--muted); font-size: 14px; }
 .list-head form { margin: 0; }
 
 .empty {
@@ -307,7 +309,6 @@ button.small { padding: 3px 12px; font-size: 13px; }
   border: 1px solid var(--line);
   border-radius: 14px;
   box-shadow: var(--shadow);
-  overflow: hidden;
 }
 
 .row {
@@ -318,7 +319,10 @@ button.small { padding: 3px 12px; font-size: 13px; }
   padding: 12px 16px;
   border-top: 1px solid var(--line);
 }
-.row:first-child { border-top: 0; }
+/* The list does not clip its rows, so a row's menu can open past the card;
+   the end rows round their own corners for the hover background instead. */
+.row:first-child { border-top: 0; border-top-left-radius: 13px; border-top-right-radius: 13px; }
+.row:last-child { border-bottom-left-radius: 13px; border-bottom-right-radius: 13px; }
 .row:hover { background: color-mix(in srgb, var(--panel-2) 55%, transparent); }
 
 .thumb {
@@ -416,6 +420,7 @@ details.add-sub[open] > summary { margin-bottom: 12px; }
   font-weight: 800;
   font-size: 18px;
 }
+img.avatar { object-fit: cover; background: var(--panel-2); }
 .tone-0 { background: #7aa2f7; }
 .tone-1 { background: #9ece6a; }
 .tone-2 { background: #ff9e64; }
@@ -457,7 +462,6 @@ details.more .menu {
 
 @media (max-width: 760px) {
   .account .name { display: none; }
-  .compose-main { flex-direction: column; }
   .compose-bar .hint { display: none; }
   .row, .row.sub { grid-template-columns: 88px minmax(0, 1fr); }
   .row.sub { grid-template-columns: 40px minmax(0, 1fr); }
@@ -473,3 +477,21 @@ details.more .menu {
   .tabs a { padding: 6px 10px; }
   .account { padding-left: 8px; }
 }
+
+/* The confirmation that removing a download or clearing the list asks for. */
+dialog.confirm {
+  width: min(440px, calc(100vw - 32px));
+  padding: 20px 22px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: var(--panel);
+  color: var(--text);
+  box-shadow: var(--shadow);
+}
+dialog.confirm::backdrop { background: rgba(0, 0, 0, 0.45); }
+dialog.confirm h2 { margin: 0 0 8px; font-size: 17px; }
+dialog.confirm p { margin: 0 0 10px; color: var(--muted); overflow-wrap: anywhere; }
+dialog.confirm .what { color: var(--text); font-weight: 600; }
+dialog.confirm .keep { display: flex; align-items: center; gap: 8px; font-weight: 600; cursor: pointer; }
+dialog.confirm .dialog-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 18px; }
+button.primary.danger { background: var(--error); }

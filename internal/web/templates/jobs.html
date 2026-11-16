@@ -1,13 +1,20 @@
 {{define "jobs" -}}
 <section id="jobs" class="list" aria-live="polite" hx-sync="this:drop"{{if or .Active .Unsaved}} hx-get="{{.Poll}}" hx-trigger="every 2s" hx-swap="outerHTML"{{end}}>
-  {{if .CountsOOB}}{{template "counts" .Counts}}{{end}}
   {{with .Unsaved}}<p class="error" role="alert">ukai cannot save the job list to disk (failing since {{.}}) and keeps trying. Until a save works, a restart would lose the changes since then: jobs that finished or were canceled would be queued and run again. See the ukai log.</p>{{end}}
   {{with .Error}}<p class="error" role="alert">{{.}}</p>{{end}}
   <div class="list-head">
-    <span class="count">{{if .Filter.Set}}{{len .Jobs}} of {{.Total}}{{else}}{{.Total}}{{end}} downloads</span>
+    {{/* The state chips belong to the filter form (form="filter"), so its
+         searches carry the state, but sit here at the head of the list. */}}
+    <div class="chips" role="radiogroup" aria-label="State" hx-get="/jobs" hx-trigger="change" hx-include="#filter" hx-target="#jobs" hx-swap="outerHTML" hx-sync="#jobs:replace">
+      <label><input type="radio" name="state" value="" form="filter"{{if eq .Filter.State ""}} checked{{end}}><span>All <b>{{.Counts.All}}</b></span></label>
+      <label><input type="radio" name="state" value="active" form="filter"{{if eq .Filter.State "active"}} checked{{end}}><span>In progress <b>{{.Counts.Active}}</b></span></label>
+      <label><input type="radio" name="state" value="done" form="filter"{{if eq .Filter.State "done"}} checked{{end}}><span>Done <b>{{.Counts.Done}}</b></span></label>
+      <label><input type="radio" name="state" value="failed" form="filter"{{if eq .Filter.State "failed"}} checked{{end}}><span>Failed <b>{{.Counts.Failed}}</b></span></label>
+    </div>
     {{if .Finished}}
-    <form method="post" action="/jobs/clear" hx-post="/jobs/clear" hx-target="#jobs" hx-swap="outerHTML" hx-sync="#jobs:replace" hx-confirm="Remove every finished job from the list? The downloaded files stay.">
+    <form method="post" action="/jobs/clear" hx-post="/jobs/clear" hx-target="#jobs" hx-swap="outerHTML" hx-sync="#jobs:replace" data-remove data-heading="Clear {{.Finished}} finished {{if eq .Finished 1}}download{{else}}downloads{{end}}?" data-what="Every download that is no longer queued or running leaves the list." data-files="{{.FinishedFiles}}" data-action="Clear">
       {{template "filterfields" .Filter}}
+      <input type="hidden" name="files" value="">
       <button type="submit" class="ghost small">Clear finished</button>
     </form>
     {{end}}
@@ -46,9 +53,10 @@
         </form>
         {{end}}
         {{if .CanRemove}}
-        <form method="post" action="/jobs/{{.ID}}/remove" hx-post="/jobs/{{.ID}}/remove" hx-target="#jobs" hx-swap="outerHTML" hx-sync="#jobs:replace">
+        <form method="post" action="/jobs/{{.ID}}/remove" hx-post="/jobs/{{.ID}}/remove" hx-target="#jobs" hx-swap="outerHTML" hx-sync="#jobs:replace" data-remove data-heading="Remove this download?" data-what="{{.Title}}" data-files="{{len .Files}}" data-action="Remove">
           {{template "filterfields" $.Filter}}
-          <button type="submit" class="icon-btn danger" title="Remove from the list" aria-label="Remove from the list"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18"/></svg></button>
+          <input type="hidden" name="files" value="">
+          <button type="submit" class="icon-btn danger" title="Remove" aria-label="Remove"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18"/></svg></button>
         </form>
         {{end}}
       </div>
@@ -61,10 +69,6 @@
   {{end}}
   </ol>{{end}}
 </section>
-{{- end}}
-
-{{define "counts" -}}
-<b id="n-all" hx-swap-oob="true">{{.All}}</b><b id="n-active" hx-swap-oob="true">{{.Active}}</b><b id="n-done" hx-swap-oob="true">{{.Done}}</b><b id="n-failed" hx-swap-oob="true">{{.Failed}}</b>
 {{- end}}
 
 {{define "filterfields" -}}

@@ -92,7 +92,10 @@ type Sub struct {
 	Name string `json:"name"`
 	// Folder is the directory under the download directory its files go to,
 	// empty until the first check names it.
-	Folder  string  `json:"folder,omitempty"`
+	Folder string `json:"folder,omitempty"`
+	// Avatar is the channel's picture URL from the last check that reported
+	// one.
+	Avatar  string  `json:"avatar,omitempty"`
 	Mode    SubMode `json:"mode"`
 	Kind    Kind    `json:"kind"`
 	Quality string  `json:"quality,omitempty"`

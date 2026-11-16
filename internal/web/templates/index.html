@@ -46,13 +46,15 @@
   <label for="url" class="sr-only">Video URL</label>
   <div class="compose-main">
     {{template "urlbox" .URLBox}}
-    <button type="submit" class="primary">Download</button>
   </div>
   <div class="compose-bar">
     {{template "options" .Options}}
     <button type="submit" class="link" formaction="/probe" hx-post="/probe" hx-target="#options" hx-swap="outerHTML" hx-indicator="#looking" hx-disabled-elt="this">Show qualities</button>
     <span id="looking" class="indicator" role="status">Asking yt-dlp…</span>
-    <span class="hint">Enter downloads, Shift+Enter adds a line for another URL</span>
+    <div class="compose-go">
+      <span class="hint">Enter downloads, Shift+Enter adds a line for another URL</span>
+      <button type="submit" class="primary">Download</button>
+    </div>
   </div>
   {{with .Error}}<p class="error" role="alert">{{.}}</p>{{end}}
 </form>
@@ -67,12 +69,6 @@
     <label><input type="radio" name="show" value="video"{{if eq .Filter.Show "video"}} checked{{end}}><span>Video</span></label>
     <label><input type="radio" name="show" value="audio"{{if eq .Filter.Show "audio"}} checked{{end}}><span>Audio</span></label>
   </div>
-  <div class="chips" role="radiogroup" aria-label="State">
-    <label><input type="radio" name="state" value=""{{if eq .Filter.State ""}} checked{{end}}><span>All <b id="n-all">{{.List.Counts.All}}</b></span></label>
-    <label><input type="radio" name="state" value="active"{{if eq .Filter.State "active"}} checked{{end}}><span>In progress <b id="n-active">{{.List.Counts.Active}}</b></span></label>
-    <label><input type="radio" name="state" value="done"{{if eq .Filter.State "done"}} checked{{end}}><span>Done <b id="n-done">{{.List.Counts.Done}}</b></span></label>
-    <label><input type="radio" name="state" value="failed"{{if eq .Filter.State "failed"}} checked{{end}}><span>Failed <b id="n-failed">{{.List.Counts.Failed}}</b></span></label>
-  </div>
   <select name="order" aria-label="Order">
     <option value="">Newest first</option>
     <option value="oldest"{{if eq .Filter.Order "oldest"}} selected{{end}}>Oldest first</option>
@@ -81,12 +77,26 @@
 </form>
 
 {{template "jobs" .List}}
+
+<dialog id="remove-dialog" class="confirm" aria-labelledby="remove-heading">
+  <form method="dialog">
+    <h2 id="remove-heading"></h2>
+    <p class="what"></p>
+    <div class="files">
+      <p>The downloaded files are deleted too. A file that another listed download also uses stays.</p>
+      <label class="keep"><input type="checkbox" name="keep"> Keep the files</label>
+    </div>
+    <div class="dialog-actions">
+      <button type="submit" value="cancel" class="ghost" autofocus>Cancel</button>
+      <button type="submit" value="confirm" class="primary danger"></button>
+    </div>
+  </form>
+</dialog>
 {{template "bottom" .}}
 {{- end}}
 
 {{define "options" -}}
-<fieldset id="options" class="options"{{if .OOB}} hx-swap-oob="true"{{end}}>
-  <legend class="sr-only">Save as</legend>
+<div id="options" class="options"{{if .OOB}} hx-swap-oob="true"{{end}}>
   <input type="hidden" name="probed_url" value="{{.ProbedURL}}">
   <div class="segmented" role="radiogroup" aria-label="Save as">
     <label><input type="radio" name="kind" value="video"{{if ne .Kind "audio"}} checked{{end}}><span>Video</span></label>
@@ -107,7 +117,7 @@
   </select>
   {{with .Title}}<p class="probed">Qualities of {{.}}</p>{{end}}
   {{with .Error}}<p class="error" role="alert">{{.}}</p>{{end}}
-</fieldset>
+</div>
 {{- end}}
 
 {{define "urlbox" -}}

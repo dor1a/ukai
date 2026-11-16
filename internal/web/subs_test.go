@@ -78,6 +78,20 @@ func sampleSubs() *stubSubs {
 	}}
 }
 
+func TestSubAvatarOrInitial(t *testing.T) {
+	l := sampleSubs()
+	l.views[0].Avatar = "https://yt3.googleusercontent.com/band=s88"
+	l.views[1].Avatar = "http://yt3.googleusercontent.com/quiet=s88"
+	b := do(subsServer(t, l), "GET", "/subs", nil, nil).Body.String()
+	if !strings.Contains(b, `<img class="avatar" src="https://yt3.googleusercontent.com/band=s88" alt="" width="44" height="44" loading="lazy">`) {
+		t.Errorf("the channel picture is missing:\n%s", b)
+	}
+	// A picture that is not https falls back to the initial.
+	if strings.Contains(b, "http://yt3") || !strings.Contains(b, `aria-hidden="true">H</div>`) {
+		t.Errorf("a plain http picture was shown, or its initial is missing:\n%s", b)
+	}
+}
+
 func TestSubsNeedTurningOn(t *testing.T) {
 	h := server(t, &stubJobs{})
 	for _, target := range []string{"/subs", "/subs/list"} {

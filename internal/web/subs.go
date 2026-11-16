@@ -62,7 +62,9 @@ type subRow struct {
 	ID, Name, URL, Mode, Kind, Quality string
 	Paused, Checking                   bool
 	Status, Error, Added               string
-	// Initial and Tone draw the round badge; Detail is the folder and URL.
+	// Avatar is the channel's picture; without one, Initial and Tone draw
+	// the round badge. Detail is the folder and URL.
+	Avatar  string
 	Initial string
 	Tone    int
 	Detail  string
@@ -85,6 +87,7 @@ func (s *Server) subsList(errMsg string, poll bool) subsList {
 			Error:    v.CheckError,
 			Added:    v.CreatedAt.Local().Format("2006-01-02"),
 		}
+		r.Avatar = httpsURL(v.Avatar)
 		r.Initial, r.Tone = initial(r.Name), tone(r.Name)
 		var detail []string
 		if v.Folder != "" {

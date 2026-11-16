@@ -458,8 +458,16 @@ func (m *Manager) check(ctx context.Context, id string) {
 	if s.Name == "" {
 		s.Name = listingName(listing, s.URL)
 	}
+	changed := false
 	if s.Folder == "" {
 		s.Folder = m.uniqueFolderLocked(folderName(s.Name))
+		changed = true
+	}
+	if listing.Avatar != "" && listing.Avatar != s.Avatar {
+		s.Avatar = listing.Avatar
+		changed = true
+	}
+	if changed {
 		m.saveOrMarkLocked()
 	}
 	sub = copySub(s)

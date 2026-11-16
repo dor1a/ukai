@@ -17,6 +17,25 @@ func TestListArgs(t *testing.T) {
 	}
 }
 
+func TestListingAvatar(t *testing.T) {
+	for _, c := range []struct{ thumbs, want string }{
+		// The channel picture comes whole ("=s0") and is asked for at 88px.
+		{`[{"id":"0","url":"https://yt3.googleusercontent.com/banner=w1060"},{"id":"7","url":"https://yt3.googleusercontent.com/pic=s900-c-k-no"},{"id":"avatar_uncropped","url":"https://yt3.googleusercontent.com/pic=s0"}]`,
+			"https://yt3.googleusercontent.com/pic=s88"},
+		{`[{"id":"avatar_uncropped","url":"https://img.example/pic"}]`, "https://img.example/pic"},
+		{`[{"id":"avatar_uncropped","url":"http://yt3.googleusercontent.com/pic=s0"}]`, ""},
+		{`[{"id":"avatar_uncropped","url":"javascript:alert(1)"}]`, ""},
+		// A playlist has video thumbnails but no channel picture.
+		{`[{"id":"0","url":"https://i.ytimg.com/vi/a1/hqdefault.jpg"}]`, ""},
+		{`[]`, ""},
+	} {
+		l, err := parseListing([]byte(`{"_type":"playlist","title":"T","thumbnails":` + c.thumbs + `,"entries":[]}`))
+		if err != nil || l.Avatar != c.want {
+			t.Errorf("%s: avatar %q, %v; want %q", c.thumbs, l.Avatar, err, c.want)
+		}
+	}
+}
+
 func TestParseListing(t *testing.T) {
 	videos := `{"_type":"playlist","title":"Band - Videos","channel":"Band","entries":[
 		{"_type":"url","ie_key":"Youtube","id":"b2","url":"https://www.youtube.com/watch?v=b2","title":"Second"},

@@ -33,9 +33,12 @@ type stubJobs struct {
 	retried   []string
 	removed   []string
 	cleared   int
-	actErr    error
-	failAt    int
-	calls     int
+	// removedFiles and clearedFiles record each call's deleteFiles.
+	removedFiles []bool
+	clearedFiles []bool
+	actErr       error
+	failAt       int
+	calls        int
 }
 
 func (s *stubJobs) Submit(u string, k store.Kind, q string) (store.Job, error) {
@@ -64,17 +67,19 @@ func (s *stubJobs) Retry(id string) error {
 	return s.actErr
 }
 
-func (s *stubJobs) Remove(id string) error {
+func (s *stubJobs) Remove(id string, deleteFiles bool) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.removed = append(s.removed, id)
+	s.removedFiles = append(s.removedFiles, deleteFiles)
 	return s.actErr
 }
 
-func (s *stubJobs) ClearFinished() (int, error) {
+func (s *stubJobs) ClearFinished(deleteFiles bool) (int, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.cleared++
+	s.clearedFiles = append(s.clearedFiles, deleteFiles)
 	return 0, s.actErr
 }
 
@@ -197,7 +202,7 @@ func TestListPollsOnlyWhileActive(t *testing.T) {
 	}
 
 	j.views = j.views[1:]
-	if b := do(h, "GET", "/jobs", nil, htmx).Body.String(); strings.Contains(b, "hx-trigger") {
+	if b := do(h, "GET", "/jobs", nil, htmx).Body.String(); strings.Contains(b, `hx-trigger="every 2s"`) {
 		t.Error("list keeps polling with no active jobs")
 	}
 }
@@ -221,7 +226,7 @@ func TestListWarnsWhileUnsaved(t *testing.T) {
 	}
 
 	j.unsaved = time.Time{}
-	if b := do(h, "GET", "/jobs", nil, htmx).Body.String(); strings.Contains(b, "cannot save") || strings.Contains(b, "hx-trigger") {
+	if b := do(h, "GET", "/jobs", nil, htmx).Body.String(); strings.Contains(b, "cannot save") || strings.Contains(b, `hx-trigger="every 2s"`) {
 		t.Errorf("warning or polling left after a save\n%s", b)
 	}
 }
@@ -240,7 +245,7 @@ func TestSubmitHTMX(t *testing.T) {
 		t.Error("response is not the job list")
 	}
 	// The choices go back to the defaults for the next URL and keep the kind.
-	for _, want := range []string{`<fieldset id="options" class="options" hx-swap-oob="true">`, `value="audio" checked`, `<option value="best" selected>Best (original)</option>`} {
+	for _, want := range []string{`<div id="options" class="options" hx-swap-oob="true">`, `value="audio" checked`, `<option value="best" selected>Best (original)</option>`} {
 		if !strings.Contains(b, want) {
 			t.Errorf("response lacks %q\n%s", want, b)
 		}
@@ -300,7 +305,7 @@ func TestProbeHTMX(t *testing.T) {
 		t.Fatalf("asked %q", p.asked)
 	}
 	for _, want := range []string{
-		`<fieldset id="options" class="options">`,
+		`<div id="options" class="options">`,
 		`name="probed_url" value="https://example.com/v"`,
 		`<optgroup label="Up to"><option value="2160">2160p60</option><option value="1080">1080p</option></optgroup>`,
 		`<option value="fmt-251">Opus 129 kbps (webm, medium)</option>`,
