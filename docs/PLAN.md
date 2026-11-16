@@ -32,7 +32,7 @@ ytdl-material bundles yt-dlp with the Python of its image. When yt-dlp dropped s
 ## Layout
 
 ```
- browser ──▶ (Cloudflare Access or nothing) ──▶ ukai :8080
+ browser ──▶ (Cloudflare Access or nothing) ──▶ ukai :8868
                                                  │  UKAI_AUTH=oidc → OIDC sign-in
                                                  │  UKAI_AUTH=none → open
                                                  │
@@ -60,7 +60,7 @@ All settings are environment variables. Defaults marked `draft` may change.
 | Variable | Default | Meaning |
 | -- | -- | -- |
 | `UKAI_AUTH` | none set, required | `oidc` or `none` |
-| `UKAI_LISTEN` | `:8080` | HTTP listen address |
+| `UKAI_LISTEN` | `:8868` | HTTP listen address |
 | `UKAI_DATA_DIR` | `/data` | subscriptions, job history, download archives |
 | `UKAI_DOWNLOAD_DIR` | `/downloads` | where finished files go |
 | `UKAI_CONCURRENCY` | `2` (draft) | downloads running at the same time |

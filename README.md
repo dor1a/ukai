@@ -46,7 +46,7 @@ services:
       UKAI_AUTH: none
       TZ: Asia/Seoul
     ports:
-      - "8080:8080"
+      - "8868:8868"
     volumes:
       - ukai-data:/data
       - /path/to/downloads:/downloads
@@ -115,7 +115,7 @@ All settings are environment variables.
 | Variable | Default | Meaning |
 | -- | -- | -- |
 | `UKAI_AUTH` | none, required | `oidc` or `none`. ukai refuses to start without it |
-| `UKAI_LISTEN` | `:8080` | HTTP listen address |
+| `UKAI_LISTEN` | `:8868` | HTTP listen address |
 | `UKAI_DATA_DIR` | `/data` | `jobs.json`, `subs.json`, one download archive per subscription in `archive/`, partial downloads, the yt-dlp and Deno caches (in the image) |
 | `UKAI_DOWNLOAD_DIR` | `/downloads` | Where finished files go. It must exist and must not overlap the data directory |
 | `UKAI_CONCURRENCY` | `2` | Downloads running at the same time, 1 to 16 |

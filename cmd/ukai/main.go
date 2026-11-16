@@ -180,7 +180,7 @@ func serve() error {
 func healthcheck() error {
 	addr := os.Getenv("UKAI_LISTEN")
 	if addr == "" {
-		addr = ":8080"
+		addr = config.DefaultListen
 	}
 	host, port, err := net.SplitHostPort(addr)
 	if err != nil {

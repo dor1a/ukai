@@ -18,7 +18,7 @@ func TestLoadDefaults(t *testing.T) {
 	}
 	want := Config{
 		Auth:         AuthNone,
-		Listen:       ":8080",
+		Listen:       ":8868",
 		DataDir:      "/data",
 		DownloadDir:  "/downloads",
 		Concurrency:  2,

@@ -14,6 +14,9 @@ import (
 )
 
 // Auth values accepted in UKAI_AUTH.
+// DefaultListen is the address ukai serves on when UKAI_LISTEN is not set.
+const DefaultListen = ":8868"
+
 const (
 	AuthNone = "none"
 	AuthOIDC = "oidc"
@@ -72,7 +75,7 @@ func Load(getenv func(string) string) (Config, error) {
 
 	c := Config{
 		Auth:   strings.ToLower(get("UKAI_AUTH", "")),
-		Listen: get("UKAI_LISTEN", ":8080"),
+		Listen: get("UKAI_LISTEN", DefaultListen),
 		YtDlp:  get("UKAI_YTDLP", "/usr/local/bin/yt-dlp"),
 	}
 	var err error

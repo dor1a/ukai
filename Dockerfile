@@ -79,7 +79,7 @@ USER ukai
 ENV UKAI_DATA_DIR=/data \
     UKAI_DOWNLOAD_DIR=/downloads \
     XDG_CACHE_HOME=/data/cache
-EXPOSE 8080
+EXPOSE 8868
 HEALTHCHECK --interval=30s --timeout=5s CMD ["ukai", "healthcheck"]
 ENTRYPOINT ["ukai"]
 CMD ["serve"]
