@@ -638,3 +638,125 @@ func TestStrayArchivesAreRemovedAtStart(t *testing.T) {
 		}
 	}
 }
+
+func TestFinishedReleasesAreNotQueuedAgain(t *testing.T) {
+	e := newEnv(t)
+	const releases = "https://www.youtube.com/@band/releases"
+	album := func(id string) ytdlp.Entry {
+		return ytdlp.Entry{Key: "youtubetab", ID: id, URL: "https://www.youtube.com/playlist?list=" + id, Title: "Album " + id}
+	}
+	e.lister.set(releases, ytdlp.Listing{Channel: "Band", Entries: []ytdlp.Entry{album("OLAK5uy_b"), album("OLAK5uy_a")}})
+	m := e.manager()
+	s, err := m.Add(releases, "Band", store.SubAll, store.KindAudio, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	run(t, m)
+	start := time.Now().Add(-time.Second)
+	waitFor(t, "first check", checked(m, s.ID, start))
+	if got := e.queue.submitted(); len(got) != 2 {
+		t.Fatalf("first check queued %+v, want both albums", got)
+	}
+
+	// yt-dlp archives an album's videos, not the album. Album a is done,
+	// album b failed once.
+	path := filepath.Join(e.archive, s.ID+".txt")
+	if err := os.WriteFile(path, []byte("youtube v1\nyoutube v2\n"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	m.JobFinished(store.Job{URL: album("OLAK5uy_a").URL, State: store.Done, Sub: s.ID})
+	m.JobFinished(store.Job{URL: album("OLAK5uy_b").URL, State: store.Failed, Sub: s.ID})
+	// A video's done job adds nothing; yt-dlp has archived it already.
+	m.JobFinished(store.Job{URL: "https://www.youtube.com/watch?v=v1", State: store.Done, Sub: s.ID})
+	if b, _ := os.ReadFile(path); string(b) != "youtube v1\nyoutube v2\nyoutubetab OLAK5uy_a\n" {
+		t.Fatalf("archive = %q", b)
+	}
+
+	second := time.Now()
+	if err := m.Check(s.ID); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "second check", checked(m, s.ID, second))
+	got := e.queue.submitted()
+	if len(got) != 3 || got[2].url != album("OLAK5uy_b").URL {
+		t.Fatalf("queued %+v, want only the failed album again", got)
+	}
+}
+
+// An album downloaded by 0.1.3 or older has only its videos in the archive.
+// While its done job is listed, a check notes the album, so the check after
+// the job leaves the list passes it by.
+func TestListedAlbumsGoInTheArchive(t *testing.T) {
+	e := newEnv(t)
+	const releases = "https://www.youtube.com/@band/releases"
+	const list = "OLAK5uy_old"
+	albumURL := "https://www.youtube.com/playlist?list=" + list
+	e.lister.set(releases, ytdlp.Listing{Channel: "Band", Entries: []ytdlp.Entry{{Key: "youtubetab", ID: list, URL: albumURL, Title: "Old album"}}})
+	m := e.manager()
+	s, err := m.Add(releases, "Band", store.SubAll, store.KindAudio, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(e.archive, s.ID+".txt")
+	if err := os.WriteFile(path, []byte("youtube v1\n"), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	e.queue.mu.Lock()
+	e.queue.views = []jobs.View{{Job: store.Job{ID: "j1", URL: albumURL, Sub: s.ID, State: store.Done}}}
+	e.queue.mu.Unlock()
+	run(t, m)
+	start := time.Now().Add(-time.Second)
+	waitFor(t, "first check", checked(m, s.ID, start))
+	if b, _ := os.ReadFile(path); string(b) != "youtube v1\nyoutubetab "+list+"\n" {
+		t.Fatalf("archive = %q", b)
+	}
+
+	e.queue.mu.Lock()
+	e.queue.views = nil
+	e.queue.mu.Unlock()
+	second := time.Now()
+	if err := m.Check(s.ID); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "second check", checked(m, s.ID, second))
+	if got := e.queue.submitted(); len(got) != 0 {
+		t.Fatalf("queued %+v, want nothing", got)
+	}
+	if b, _ := os.ReadFile(path); strings.Count(string(b), list) != 1 {
+		t.Fatalf("archive = %q, want the album once", b)
+	}
+}
+
+func TestNoteAlbumsBeforeTheFirstCheck(t *testing.T) {
+	e := newEnv(t)
+	m := e.manager()
+	s, err := m.Add("https://www.youtube.com/@band/releases", "Band", store.SubAll, store.KindAudio, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.queue.mu.Lock()
+	e.queue.views = []jobs.View{
+		{Job: store.Job{ID: "j1", URL: "https://www.youtube.com/playlist?list=OLAK5uy_a", Sub: s.ID, State: store.Done}},
+		{Job: store.Job{ID: "j2", URL: "https://www.youtube.com/playlist?list=OLAK5uy_b", Sub: s.ID, State: store.Failed}},
+		{Job: store.Job{ID: "j3", URL: "https://www.youtube.com/playlist?list=OLAK5uy_c", Sub: "other", State: store.Done}},
+	}
+	e.queue.mu.Unlock()
+	m.NoteAlbums()
+	if b, _ := os.ReadFile(filepath.Join(e.archive, s.ID+".txt")); string(b) != "youtubetab OLAK5uy_a\n" {
+		t.Fatalf("archive = %q", b)
+	}
+}
+
+func TestPlaylistIDs(t *testing.T) {
+	for in, want := range map[string]string{
+		"https://www.youtube.com/playlist?list=OLAK5uy_kn2J-P_H1KMg": "OLAK5uy_kn2J-P_H1KMg",
+		"https://www.youtube.com/watch?v=a":                          "",
+		"https://www.youtube.com/playlist?list=a%0Ab":                "",
+		"https://www.youtube.com/playlist?list=a%20b":                "",
+		"::not a url": "",
+	} {
+		if got := playlistID(in); got != want {
+			t.Errorf("playlistID(%q) = %q, want %q", in, got, want)
+		}
+	}
+}

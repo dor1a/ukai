@@ -64,7 +64,8 @@ All settings are environment variables. Defaults marked `draft` may change.
 | `UKAI_DATA_DIR` | `/data` | subscriptions, job history, download archives |
 | `UKAI_DOWNLOAD_DIR` | `/downloads` | where finished files go |
 | `UKAI_CONCURRENCY` | `2` (draft) | downloads running at the same time |
-| `UKAI_JOB_HISTORY` | `200` (draft) | finished jobs kept in `jobs.json` |
+| `UKAI_JOB_HISTORY` | `200` (draft) | finished jobs kept in `jobs.json` that no subscription queued |
+| `UKAI_SUB_JOB_HISTORY` | `20` | finished jobs kept in `jobs.json` for each subscription |
 | `UKAI_SUBS_INTERVAL` | `6h` | how often every subscription is checked |
 | `UKAI_YTDLP` | `/usr/local/bin/yt-dlp` | yt-dlp binary |
 | `UKAI_PUBLIC_URL` | | where browsers reach ukai, required with `oidc` |
@@ -89,7 +90,7 @@ All settings are environment variables. Defaults marked `draft` may change.
 - File names carry the quality, so two qualities of one video never share a file: `Title [id] 1920x1080.webm`, `Title [id] 251.opus` (format ID), `Title [id] 320k.mp3`.
 - A queue with `UKAI_CONCURRENCY` workers. Jobs can be cancelled.
 - One yt-dlp run per job. Metadata comes from `--print before_dl:` lines and the final path from `--print after_move:`, progress from `--progress-template` lines. The jobs page shows them with HTMX polling while anything is queued or running.
-- `store` behind an interface, backed by JSON files written atomically. Only the last `UKAI_JOB_HISTORY` finished jobs are kept. When a change that cannot be taken back (such as a running job's result) fails to save, memory stays the truth: the jobs page warns, and ukai saves the whole list again every 5 seconds until it works.
+- `store` behind an interface, backed by JSON files written atomically. Only the last `UKAI_JOB_HISTORY` finished jobs are kept, and the last `UKAI_SUB_JOB_HISTORY` of each subscription. When a change that cannot be taken back (such as a running job's result) fails to save, memory stays the truth: the jobs page warns, and ukai saves the whole list again every 5 seconds until it works.
 - One log line per job event (queued, started, done, failed, canceled, requeued) with the job ID.
 - `/healthz` for the container health check. It stays healthy while saves fail, since a restart would queue finished jobs again.
 - Tests run against a fake yt-dlp script that prints recorded metadata and progress lines.
@@ -112,6 +113,7 @@ All settings are environment variables. Defaults marked `draft` may change.
 - Checks run every `UKAI_SUBS_INTERVAL` and can be started by hand. Every subscription is checked each round, unlike ytdl-material, which checks one per round. A later check lists only the newest 50 videos.
 - New videos are queued as ordinary jobs, oldest first, into a folder named after the subscription. A video that failed three times is left alone.
 - A channel's main URL lists its tabs (Videos, Shorts), so ukai uses its Videos tab.
+- A subscription's downloads are listed under it on the Subscriptions page, not on the main list, and folded unless one is queued or running. They share the one queue. Once the subscription is removed, they move to the main list.
 
 ### 4. Image and deployment
 
@@ -144,3 +146,4 @@ All settings are environment variables. Defaults marked `draft` may change.
 | -- | -- |
 | How to update yt-dlp | Rebuild the image with a new pinned version. Rebuilding keeps the checksum check |
 | API scope | Submit and status. Status lets a bot say when a download is done |
+| Page language | English by default, Korean from the globe menu in the top bar, kept in the `ukai_lang` cookie. Texts are looked up by their English, so a missing translation shows English. The API and the log stay in English |

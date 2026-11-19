@@ -26,12 +26,13 @@ Paste a URL or subscribe to a channel, pick video or audio, and the files land i
 - Lists jobs one per row with the site's thumbnail, uploader, length and size. The list can be searched by title, uploader or URL, narrowed to video or audio and by state, and sorted oldest first.
 - Plays a finished download in the page and links each file for saving. Only files a job recorded are served, by their place in that job, from inside the download directory.
 - Removes finished jobs from the list one at a time or all at once. Both ask first, in a dialog that deletes the downloaded files too unless **Keep the files** is checked. Deleting checks every file of a job before removing any: only plain files inside the download directory go, never through a symbolic link, and a file that another listed job still names stays. When a job's files cannot all be deleted, the job stays in the list with them. A subscription's download archive still lists a deleted video, so it is not downloaded again.
-- Subscribes to channels and playlists on the **Subscriptions** page. Each subscription has its own video or audio quality and either downloads everything the channel has and then each new upload, or only what appears after it is added. Its files go to a folder named after it under the download directory, and its own yt-dlp download archive keeps a video from being downloaded twice. Every subscription is checked every `UKAI_SUBS_INTERVAL`, or at once with **Check now**; a check lists only the newest 50 videos, except the first, which lists everything. A channel's main URL is taken as its Videos tab. A subscription shows the channel's picture once a check has seen it. It can be paused, and unsubscribing keeps the downloaded files.
+- Subscribes to channels and playlists on the **Subscriptions** page. Each subscription has its own video or audio quality and either downloads everything the channel has and then each new upload, or only what appears after it is added. Its files go to a folder named after it under the download directory, and its own yt-dlp download archive keeps a video from being downloaded twice. Every subscription is checked every `UKAI_SUBS_INTERVAL`, or at once with **Check now**; a check lists only the newest 50 videos, except the first, which lists everything. A channel's main URL is taken as its Videos tab. A channel's Releases tab lists albums rather than videos; yt-dlp archives an album's videos, so ukai adds the album itself to the archive once its download is done, and later checks leave it alone. A subscription shows the channel's picture once a check has seen it. Its downloads share the one queue but are listed under it rather than on the main page, folded until one is running, with their own **Clear finished**. It can be paused, and unsubscribing keeps the downloaded files and moves its downloads to the main list.
 - Names each file after the title, video ID and quality, so two qualities of one video never share a file: `Title [id] 1920x1080.webm`, `Title [id] 251.opus`, `Title [id] 320k.mp3`.
 - Keeps the job history in `jobs.json` in the data directory.
 - Signs users in with any standard OIDC provider, or leaves that to a proxy in front. With OIDC, only members of one group get in, and the top bar shows who is signed in.
 - Takes downloads from bots and scripts through a small token API, which also reports how each one is going.
-- Follows the system's light or dark mode, with a toggle in the top bar.
+- Follows the system's light or dark mode, with a toggle at the bottom right.
+- Shows its pages in English or Korean. English is the default; the globe in the top bar opens a menu of the languages, and a cookie (`ukai_lang`) keeps the choice. The API, the log, and messages from yt-dlp stay in English.
 
 ukai runs yt-dlp's standalone release binary as a child process. It never imports yt-dlp, so a Python version in the image can never break downloads. It does not use YouTube account cookies.
 
@@ -119,7 +120,8 @@ All settings are environment variables.
 | `UKAI_DATA_DIR` | `/data` | `jobs.json`, `subs.json`, one download archive per subscription in `archive/`, partial downloads, the yt-dlp and Deno caches (in the image) |
 | `UKAI_DOWNLOAD_DIR` | `/downloads` | Where finished files go. It must exist and must not overlap the data directory |
 | `UKAI_CONCURRENCY` | `2` | Downloads running at the same time, 1 to 16 |
-| `UKAI_JOB_HISTORY` | `200` | Finished jobs kept in `jobs.json`, 1 to 100000 |
+| `UKAI_JOB_HISTORY` | `200` | Finished jobs kept in `jobs.json` that no subscription queued, 1 to 100000 |
+| `UKAI_SUB_JOB_HISTORY` | `20` | Finished jobs kept in `jobs.json` for each subscription, 1 to 100000. Its download archive keeps every video it took, whatever this is |
 | `UKAI_YTDLP` | `/usr/local/bin/yt-dlp` | yt-dlp binary |
 | `UKAI_SUBS_INTERVAL` | `6h` | How often every subscription is checked, from `10m` to `168h` |
 | `UKAI_PUBLIC_URL` | | Where browsers reach ukai, such as `https://ukai.example.com`, with no path. Required with `oidc` |

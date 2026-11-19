@@ -48,8 +48,11 @@ type Options struct {
 	Runner Runner
 	// Workers is how many downloads run at the same time.
 	Workers int
-	// History is how many finished jobs are kept.
+	// History is how many finished jobs are kept that no subscription
+	// queued, and SubHistory how many are kept for each subscription. Zero
+	// SubHistory means DefaultSubHistory.
 	History     int
+	SubHistory  int
 	DownloadDir string
 	// TempRoot holds one directory of partial files per job.
 	TempRoot string
@@ -115,6 +118,11 @@ type Manager struct {
 	// onFinish, when set, hears about every job that ends done, failed or
 	// canceled. It is called without the lock held.
 	onFinish func(store.Job)
+	// hearing holds the jobs that ended before onFinish heard about them.
+	// The history keeps them until it has: a subscription notes a finished
+	// album in its archive, and until then the listed job is what keeps a
+	// check from queueing the album again.
+	hearing map[string]bool
 
 	mu      sync.Mutex
 	jobs    []*store.Job // newest first
@@ -135,8 +143,11 @@ func New(opt Options) (*Manager, error) {
 	if opt.Store == nil || opt.Runner == nil {
 		return nil, errors.New("jobs: Store and Runner are required")
 	}
-	if opt.Workers < 1 || opt.History < 1 {
-		return nil, errors.New("jobs: Workers and History must be at least 1")
+	if opt.Workers < 1 || opt.History < 1 || opt.SubHistory < 0 {
+		return nil, errors.New("jobs: Workers and History must be at least 1, SubHistory at least 0")
+	}
+	if opt.SubHistory == 0 {
+		opt.SubHistory = DefaultSubHistory
 	}
 	m := &Manager{
 		opt:       opt,
@@ -144,6 +155,7 @@ func New(opt Options) (*Manager, error) {
 		now:       opt.Now,
 		live:      map[string]*Live{},
 		cancels:   map[string]context.CancelFunc{},
+		hearing:   map[string]bool{},
 		wake:      make(chan struct{}, opt.Workers),
 		saveRetry: saveRetryEvery,
 	}
@@ -193,9 +205,10 @@ func New(opt Options) (*Manager, error) {
 	}
 	m.removeStaleTemp()
 
+	// The history is trimmed only by TrimHistory or the next job, so that
+	// a subscription can first note the albums the saved jobs downloaded.
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.trimLocked()
 	if err := m.saveLocked(); err != nil {
 		return nil, fmt.Errorf("save jobs: %w", err)
 	}
@@ -325,8 +338,11 @@ func (m *Manager) Cancel(id string) error {
 	ended, err := m.cancelLocked(id)
 	hook := m.onFinish
 	m.mu.Unlock()
-	if ended != nil && hook != nil {
-		hook(*ended)
+	if ended != nil {
+		if hook != nil {
+			hook(*ended)
+		}
+		m.heard(ended.ID)
 	}
 	return err
 }
@@ -353,8 +369,8 @@ func (m *Manager) cancelLocked(id string) (*store.Job, error) {
 		}
 		m.pending = slices.DeleteFunc(m.pending, func(p string) bool { return p == id })
 		m.log.Info("job canceled", "job", id, "url", j.URL, "was", store.Queued)
+		m.hearing[id] = true
 		ended := *j
-		m.trimLocked()
 		return &ended, nil
 	case store.Running:
 		// The worker records the result when yt-dlp has stopped.
@@ -451,19 +467,21 @@ func (m *Manager) Remove(id string, deleteFiles bool) error {
 	return nil
 }
 
-// ClearFinished takes every finished job off the list and returns how many.
+// ClearFinished takes the finished jobs off the list that in accepts, by
+// their subscription ID (empty for a job no subscription queued) and the time
+// they finished, and returns how many.
 // Without deleteFiles their files stay where they are. With deleteFiles it
-// first checks every finished job's files; a job that fails the check stays
+// first checks every such job's files; a job that fails the check stays
 // listed, and so do all the files it names. It then deletes the files of the
 // others that no job staying on the list names. A job whose files cannot all
 // be deleted stays too, and ClearFinished returns ErrDelete after removing the
 // rest.
-func (m *Manager) ClearFinished(deleteFiles bool) (int, error) {
+func (m *Manager) ClearFinished(deleteFiles bool, in func(sub string, finished time.Time) bool) (int, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	stays := map[*store.Job]bool{}
 	for _, j := range m.jobs {
-		if j.Active() {
+		if j.Active() || !in(j.Sub, j.FinishedAt) {
 			stays[j] = true
 		}
 	}
@@ -842,15 +860,42 @@ func (m *Manager) run(ctx, jctx context.Context, cancel context.CancelFunc, id s
 	if j := m.findLocked(id); j != nil && !j.Active() {
 		c := *j
 		ended = &c
+		m.hearing[id] = true
 	}
 	delete(m.live, id)
 	delete(m.cancels, id)
-	m.trimLocked()
 	m.saveOrLog()
 	hook := m.onFinish
 	m.mu.Unlock()
-	if ended != nil && hook != nil {
-		hook(*ended)
+	if ended != nil {
+		if hook != nil {
+			hook(*ended)
+		}
+		m.heard(id)
+	}
+}
+
+// heard lets the history drop a job onFinish has heard about, and trims it.
+func (m *Manager) heard(id string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	delete(m.hearing, id)
+	m.trimAndSaveLocked()
+}
+
+// TrimHistory drops the finished jobs beyond the history limits. New keeps
+// every saved job until then, or until the next job ends or is queued.
+func (m *Manager) TrimHistory() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.trimAndSaveLocked()
+}
+
+func (m *Manager) trimAndSaveLocked() {
+	before := len(m.jobs)
+	m.trimLocked()
+	if len(m.jobs) < before {
+		m.saveOrLog()
 	}
 }
 
@@ -925,16 +970,27 @@ func (m *Manager) findLocked(id string) *store.Job {
 	return nil
 }
 
-// trimLocked drops the oldest finished jobs beyond the history limit.
+// DefaultSubHistory is how many finished jobs are kept for each subscription
+// when Options.SubHistory is zero.
+const DefaultSubHistory = 20
+
+// trimLocked drops the oldest finished jobs beyond the history limits:
+// History for jobs no subscription queued, SubHistory for each subscription,
+// so a busy subscription does not push the others' jobs off the list.
 func (m *Manager) trimLocked() {
-	finished := 0
+	finished := map[string]int{}
 	kept := m.jobs[:0:0]
 	for _, j := range m.jobs {
-		if !j.Active() {
-			if finished >= m.opt.History {
+		// A job onFinish has not heard about stays, outside the count.
+		if !j.Active() && !m.hearing[j.ID] {
+			limit := m.opt.History
+			if j.Sub != "" {
+				limit = m.opt.SubHistory
+			}
+			if finished[j.Sub] >= limit {
 				continue
 			}
-			finished++
+			finished[j.Sub]++
 		}
 		kept = append(kept, j)
 	}

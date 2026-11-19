@@ -33,7 +33,11 @@ document.addEventListener("keydown", function (event) {
 // Keep the job list's own refresh from replacing it while something in it is
 // playing: the swap would move the player and could stop it. The refresh is
 // skipped before it is sent, and also when playback started while it was on
-// its way. The next tick tries again.
+// its way. The next tick tries again. Where the browser has moveBefore, htmx
+// moves a preserved player without stopping it, so the list refreshes as
+// usual there.
+var movesPlayers = typeof Element !== "undefined" && typeof Element.prototype.moveBefore === "function";
+
 function playing(list) {
   var media = list.querySelectorAll("audio, video");
   for (var i = 0; i < media.length; i++) {
@@ -44,17 +48,47 @@ function playing(list) {
   return false;
 }
 
+function refreshing(list) {
+  return !movesPlayers && list && (list.id === "jobs" || list.id === "subs");
+}
+
 document.addEventListener("htmx:beforeRequest", function (event) {
   var list = event.detail.elt;
-  if (list && list.id === "jobs" && playing(list)) {
+  if (refreshing(list) && playing(list)) {
     event.preventDefault();
   }
 });
 
 document.addEventListener("htmx:beforeSwap", function (event) {
   var list = event.detail.elt;
-  if (list && list.id === "jobs" && playing(list)) {
+  if (refreshing(list) && playing(list)) {
     event.detail.shouldSwap = false;
+  }
+});
+
+// A subscription's download list stays open or folded as its viewer left it
+// across the list's refreshes. Until the viewer toggles it, it follows the
+// page, which opens it while one of its downloads is queued or running.
+// Only a click on its summary counts: a refresh that brings in an open list
+// fires a toggle event too.
+var subJobsOpen = {};
+
+document.addEventListener("click", function (event) {
+  var summary = event.target.closest && event.target.closest("details.sub-jobs[data-sub] > summary");
+  if (summary) {
+    // The click comes before the browser opens or folds the list.
+    var list = summary.parentElement;
+    subJobsOpen[list.getAttribute("data-sub")] = !list.open;
+  }
+}, true);
+
+document.addEventListener("htmx:afterSettle", function () {
+  var lists = document.querySelectorAll("details.sub-jobs[data-sub]");
+  for (var i = 0; i < lists.length; i++) {
+    var id = lists[i].getAttribute("data-sub");
+    if (Object.prototype.hasOwnProperty.call(subJobsOpen, id) && lists[i].open !== subJobsOpen[id]) {
+      lists[i].open = subJobsOpen[id];
+    }
   }
 });
 
@@ -123,8 +157,13 @@ document.addEventListener("htmx:afterRequest", function (event) {
 // deletes the downloaded files unless "Keep the files" is checked. The forms
 // post files=1 only through it, so a form sent without scripts keeps them.
 // The dialog sits outside the job list, which refreshes while anything runs,
-// so it remembers the form by its address and finds it again on confirm.
+// so it remembers the form by its address and finds it again on confirm. It
+// also remembers whether it offered to delete files and, for Clear finished,
+// when the last listed job had finished: a refresh may bring jobs and files
+// the dialog never asked about, and those stay.
 var removing = null;
+var removingFiles = false;
+var removingUpto = null;
 
 document.addEventListener("submit", function (event) {
   var form = event.target;
@@ -143,6 +182,9 @@ document.addEventListener("submit", function (event) {
   event.stopPropagation();
   var files = parseInt(form.getAttribute("data-files"), 10) > 0;
   removing = form.getAttribute("action");
+  removingFiles = files;
+  var upto = form.querySelector("input[name=upto]");
+  removingUpto = upto ? upto.value : null;
   dialog.querySelector("h2").textContent = form.getAttribute("data-heading");
   dialog.querySelector(".what").textContent = form.getAttribute("data-what");
   dialog.querySelector(".files").hidden = !files;
@@ -158,7 +200,11 @@ document.addEventListener("close", function (event) {
     return;
   }
   var action = removing;
+  var offered = removingFiles;
+  var shownUpto = removingUpto;
   removing = null;
+  removingFiles = false;
+  removingUpto = null;
   if (dialog.returnValue !== "confirm" || !action) {
     return;
   }
@@ -166,8 +212,11 @@ document.addEventListener("close", function (event) {
   for (var i = 0; i < forms.length; i++) {
     if (forms[i].getAttribute("action") === action) {
       var keep = dialog.querySelector("input[name=keep]").checked;
-      var files = parseInt(forms[i].getAttribute("data-files"), 10) > 0;
-      forms[i].querySelector("input[name=files]").value = files && !keep ? "1" : "";
+      forms[i].querySelector("input[name=files]").value = offered && !keep ? "1" : "";
+      var upto = forms[i].querySelector("input[name=upto]");
+      if (upto && shownUpto !== null) {
+        upto.value = shownUpto;
+      }
       forms[i].setAttribute("data-confirmed", "1");
       forms[i].requestSubmit();
       return;

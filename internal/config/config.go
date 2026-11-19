@@ -30,7 +30,9 @@ type Config struct {
 	DownloadDir string
 	Concurrency int
 	JobHistory  int
-	YtDlp       string
+	// SubJobHistory is how many finished jobs each subscription keeps.
+	SubJobHistory int
+	YtDlp         string
 	// SubsInterval is how often every subscription is checked.
 	SubsInterval time.Duration
 	// OIDC is set when Auth is oidc.
@@ -102,6 +104,9 @@ func Load(getenv func(string) string) (Config, error) {
 		return Config{}, err
 	}
 	if c.JobHistory, err = intIn(get("UKAI_JOB_HISTORY", "200"), "UKAI_JOB_HISTORY", 1, 100000); err != nil {
+		return Config{}, err
+	}
+	if c.SubJobHistory, err = intIn(get("UKAI_SUB_JOB_HISTORY", "20"), "UKAI_SUB_JOB_HISTORY", 1, 100000); err != nil {
 		return Config{}, err
 	}
 	if c.APITokens, err = loadAPITokens(get); err != nil {

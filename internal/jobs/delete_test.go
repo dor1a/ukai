@@ -160,7 +160,7 @@ func TestClearFinishedDeletesWhatItCan(t *testing.T) {
 		savedJob("jc", store.Canceled, 1),
 	)
 
-	n, err := m.ClearFinished(true)
+	n, err := m.ClearFinished(true, ownJobs)
 	if n != 2 || !errors.Is(err, ErrDelete) {
 		t.Fatalf("clear = %d, %v; want 2, ErrDelete", n, err)
 	}
@@ -172,7 +172,7 @@ func TestClearFinishedDeletesWhatItCan(t *testing.T) {
 	}
 	e.logs.want(t, "finished jobs removed", "count=2", "files_deleted=1")
 
-	n, err = m.ClearFinished(false)
+	n, err = m.ClearFinished(false, ownJobs)
 	if n != 1 || err != nil || listed(m, "jb") || !exists(t, bad) {
 		t.Fatalf("plain clear = %d, %v", n, err)
 	}
@@ -184,7 +184,7 @@ func TestDeleteKeepsTheJobWhenTheDownloadDirIsMissing(t *testing.T) {
 	if err := m.Remove("j1", true); !errors.Is(err, ErrDelete) || !listed(m, "j1") {
 		t.Fatalf("remove = %v, listed %v; want ErrDelete and the job kept", err, listed(m, "j1"))
 	}
-	if n, err := m.ClearFinished(true); n != 0 || !errors.Is(err, ErrDelete) || !listed(m, "j1") {
+	if n, err := m.ClearFinished(true, ownJobs); n != 0 || !errors.Is(err, ErrDelete) || !listed(m, "j1") {
 		t.Fatalf("clear = %d, %v", n, err)
 	}
 	e.logs.want(t, "cannot open the download directory")
@@ -227,7 +227,7 @@ func TestDeleteRefusesALinkInsideTheDownloadDir(t *testing.T) {
 	if !exists(t, private) || !listed(m, "j1") {
 		t.Fatal("a file reached through a link inside the download directory was deleted")
 	}
-	if n, err := m.ClearFinished(true); n != 0 || !errors.Is(err, ErrDelete) || !exists(t, private) {
+	if n, err := m.ClearFinished(true, ownJobs); n != 0 || !errors.Is(err, ErrDelete) || !exists(t, private) {
 		t.Fatalf("clear through a link = %d, %v", n, err)
 	}
 }
@@ -248,7 +248,7 @@ func TestDeleteChecksEveryFileFirst(t *testing.T) {
 	if err := m.Remove("j1", true); !errors.Is(err, ErrDelete) || !exists(t, own) || !exists(t, shared) {
 		t.Fatalf("remove = %v; own there %v, shared there %v", err, exists(t, own), exists(t, shared))
 	}
-	n, err := m.ClearFinished(true)
+	n, err := m.ClearFinished(true, ownJobs)
 	if n != 1 || !errors.Is(err, ErrDelete) {
 		t.Fatalf("clear = %d, %v; want 1, ErrDelete", n, err)
 	}

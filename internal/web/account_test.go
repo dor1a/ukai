@@ -61,7 +61,7 @@ func TestSignInGuardsThePages(t *testing.T) {
 		}
 	}
 	b := do(h, "GET", "/signed-out", nil, nil).Body.String()
-	for _, want := range []string{"<title>Signed out · ukai</title>", "You are signed out of ukai.", `<a class="button primary" href="/login">Sign in</a>`} {
+	for _, want := range []string{"<title>Signed out - ukai</title>", "You are signed out of ukai.", `<a class="button primary" href="/login">Sign in</a>`} {
 		if !strings.Contains(b, want) {
 			t.Errorf("signed-out page lacks %q", want)
 		}
@@ -108,7 +108,7 @@ func TestSignInErrorPages(t *testing.T) {
 	_, res := p.SignIn(t, h, publicURL, "/")
 	b := new(strings.Builder)
 	res.Write(b)
-	if res.StatusCode != http.StatusForbidden || !strings.Contains(b.String(), "<title>No access · ukai</title>") || !strings.Contains(b.String(), "not in the ukai-users group") {
+	if res.StatusCode != http.StatusForbidden || !strings.Contains(b.String(), "<title>No access - ukai</title>") || !strings.Contains(b.String(), "not in the ukai-users group") {
 		t.Fatalf("not in group: %d\n%s", res.StatusCode, b)
 	}
 

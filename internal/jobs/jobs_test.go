@@ -4,9 +4,11 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -672,5 +674,245 @@ func TestStopWithUnsavedJobsIsLogged(t *testing.T) {
 	// This is what the warning is about: the next start runs the job again.
 	if v := find(e.manager(1, 10), j.ID); v.State != store.Queued {
 		t.Fatalf("after restart state = %s, want queued", v.State)
+	}
+}
+
+// finishAll submits each URL in turn, as a subscription's job when ref is
+// set, waits for it to finish and returns the IDs in order.
+func finishAll(t *testing.T, m *Manager, ref *SubRef, n int) []string {
+	t.Helper()
+	var ids []string
+	for range n {
+		var j store.Job
+		var err error
+		if ref != nil {
+			j, err = m.SubmitSub("https://example.com/ok", store.KindVideo, "", *ref)
+		} else {
+			j, err = m.Submit("https://example.com/ok", store.KindVideo, "")
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		waitFor(t, "done", stateIs(m, j.ID, store.Done))
+		ids = append(ids, j.ID)
+		time.Sleep(2 * time.Millisecond) // distinct CreatedAt
+	}
+	return ids
+}
+
+// ownJobs and onlySub pick what ClearFinished takes.
+func ownJobs(sub string, _ time.Time) bool { return sub == "" }
+
+func onlySub(id string) func(string, time.Time) bool {
+	return func(sub string, _ time.Time) bool { return sub == id }
+}
+
+func listedIDs(m *Manager) []string {
+	var out []string
+	for _, v := range m.List() {
+		out = append(out, v.ID)
+	}
+	return out
+}
+
+// A subscription hears about a job before the history drops it, so a check
+// never finds the job gone and its album not yet in the archive.
+func TestTheHookSeesTheJobBeforeTheTrim(t *testing.T) {
+	e := newEnv(t)
+	m, err := New(Options{
+		Store: e.store, Runner: e.runner, Workers: 2, History: 1, SubHistory: 1,
+		DownloadDir: e.dl, TempRoot: filepath.Join(e.data, "tmp"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ref := SubRef{ID: "sub-a", Name: "A", Folder: "A"}
+	var mu sync.Mutex
+	listed := map[string]bool{}
+	m.SetOnFinish(func(j store.Job) {
+		_, ok := m.Get(j.ID)
+		mu.Lock()
+		listed[j.ID] = ok
+		mu.Unlock()
+	})
+	start(t, m)
+	older, err := m.SubmitSub("https://example.com/block", store.KindVideo, "", ref)
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "running", stateIs(m, older.ID, store.Running))
+	newer, err := m.SubmitSub("https://example.com/ok", store.KindVideo, "", ref)
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "newer done", stateIs(m, newer.ID, store.Done))
+	m.Cancel(older.ID)
+	waitFor(t, "both heard", func() bool { mu.Lock(); defer mu.Unlock(); return len(listed) == 2 })
+	waitFor(t, "older trimmed", func() bool { _, ok := m.Get(older.ID); return !ok })
+	mu.Lock()
+	defer mu.Unlock()
+	if !listed[older.ID] || !listed[newer.ID] {
+		t.Fatalf("listed in the hook: %v", listed)
+	}
+}
+
+func subManager(t *testing.T, e *env, workers int) *Manager {
+	t.Helper()
+	m, err := New(Options{
+		Store: e.store, Runner: e.runner, Workers: workers, History: 1, SubHistory: 1,
+		DownloadDir: e.dl, TempRoot: filepath.Join(e.data, "tmp"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return m
+}
+
+func savedIDs(t *testing.T, e *env) []string {
+	t.Helper()
+	saved, err := e.store.LoadJobs()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out []string
+	for _, j := range saved {
+		out = append(out, j.ID)
+	}
+	return out
+}
+
+// New keeps every saved job, so a subscription can note the albums they
+// downloaded before TrimHistory drops them.
+func TestNewKeepsSavedJobsUntilTrimmed(t *testing.T) {
+	e := newEnv(t)
+	at := time.Date(2026, 11, 19, 12, 0, 0, 0, time.UTC)
+	var saved []store.Job
+	for i := range 3 {
+		saved = append(saved, store.Job{
+			ID: fmt.Sprintf("j%d", 3-i), URL: "https://example.com/ok", Kind: store.KindVideo, State: store.Done,
+			Sub: "sub-a", SubName: "A", Folder: "A", CreatedAt: at.Add(-time.Duration(i) * time.Minute), FinishedAt: at,
+		})
+	}
+	if err := e.store.SaveJobs(saved); err != nil {
+		t.Fatal(err)
+	}
+	m := subManager(t, e, 1)
+	if got := listedIDs(m); len(got) != 3 {
+		t.Fatalf("New listed %v, want all three", got)
+	}
+	m.TrimHistory()
+	if got := listedIDs(m); !slices.Equal(got, []string{"j3"}) {
+		t.Fatalf("after TrimHistory %v", got)
+	}
+	if got := savedIDs(t, e); !slices.Equal(got, []string{"j3"}) {
+		t.Fatalf("saved %v", got)
+	}
+}
+
+// A job queued while the hook still has to hear about another does not
+// trim that one away.
+func TestTheHistoryWaitsForTheHook(t *testing.T) {
+	e := newEnv(t)
+	m := subManager(t, e, 2)
+	ref := SubRef{ID: "sub-a", Name: "A", Folder: "A"}
+	older, err := m.SubmitSub("https://example.com/block", store.KindVideo, "", ref)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hold, heard := make(chan struct{}), make(chan struct{})
+	m.SetOnFinish(func(j store.Job) {
+		if j.ID == older.ID {
+			close(heard)
+			<-hold
+		}
+	})
+	start(t, m)
+	waitFor(t, "running", stateIs(m, older.ID, store.Running))
+	newer, err := m.SubmitSub("https://example.com/ok", store.KindVideo, "", ref)
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "newer done", stateIs(m, newer.ID, store.Done))
+	m.Cancel(older.ID)
+	<-heard
+	if _, err := m.Submit("https://example.com/ok", store.KindVideo, ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := m.Get(older.ID); !ok {
+		t.Fatal("a job the hook had not heard about was trimmed")
+	}
+	close(hold)
+	waitFor(t, "older trimmed", func() bool { _, ok := m.Get(older.ID); return !ok })
+	if slices.Contains(savedIDs(t, e), older.ID) {
+		t.Fatal("the trimmed job is still saved")
+	}
+}
+
+// Canceling a queued job saves the trimmed list.
+func TestCancelSavesTheTrim(t *testing.T) {
+	e := newEnv(t)
+	m := subManager(t, e, 1)
+	ref := SubRef{ID: "sub-a", Name: "A", Folder: "A"}
+	start(t, m)
+	done := finishAll(t, m, &ref, 1)
+	running, err := m.SubmitSub("https://example.com/block", store.KindVideo, "", ref)
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "running", stateIs(m, running.ID, store.Running))
+	queued, err := m.SubmitSub("https://example.com/ok", store.KindVideo, "", ref)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := m.Cancel(queued.ID); err != nil {
+		t.Fatal(err)
+	}
+	if got := savedIDs(t, e); slices.Contains(got, done[0]) || len(got) != 2 {
+		t.Fatalf("saved %v, want the running job and the canceled one", got)
+	}
+	// The history keeps one finished job, so the canceled one may go.
+	m.Cancel(running.ID)
+	waitFor(t, "ended", func() bool { v, ok := m.Get(running.ID); return !ok || !v.Active() })
+}
+
+func TestHistoryIsKeptPerSubscription(t *testing.T) {
+	e := newEnv(t)
+	m, err := New(Options{
+		Store: e.store, Runner: e.runner, Workers: 1, History: 1, SubHistory: 2,
+		DownloadDir: e.dl, TempRoot: filepath.Join(e.data, "tmp"),
+		Log: slog.New(slog.NewTextHandler(e.logs, nil)),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	start(t, m)
+	a := finishAll(t, m, &SubRef{ID: "sub-a", Name: "A", Folder: "A"}, 3)
+	b := finishAll(t, m, &SubRef{ID: "sub-b", Name: "B", Folder: "B"}, 1)
+	own := finishAll(t, m, nil, 2)
+	// The newest first: one job of its own, two of A, the one of B.
+	want := []string{own[1], b[0], a[2], a[1]}
+	if got := listedIDs(m); !slices.Equal(got, want) {
+		t.Fatalf("kept %v, want %v", got, want)
+	}
+}
+
+func TestClearFinishedTakesOneScope(t *testing.T) {
+	e := newEnv(t)
+	m := e.manager(1, 10)
+	start(t, m)
+	a := finishAll(t, m, &SubRef{ID: "sub-a", Name: "A", Folder: "A"}, 2)
+	b := finishAll(t, m, &SubRef{ID: "sub-b", Name: "B", Folder: "B"}, 1)
+	own := finishAll(t, m, nil, 1)
+	if n, err := m.ClearFinished(false, onlySub("sub-a")); n != 2 || err != nil {
+		t.Fatalf("clear sub-a = %d, %v; want 2", n, err)
+	}
+	if got := listedIDs(m); !slices.Equal(got, []string{own[0], b[0]}) {
+		t.Fatalf("after clearing sub-a: %v (a was %v)", got, a)
+	}
+	if n, err := m.ClearFinished(false, ownJobs); n != 1 || err != nil {
+		t.Fatalf("clear own = %d, %v; want 1", n, err)
+	}
+	if got := listedIDs(m); !slices.Equal(got, []string{b[0]}) {
+		t.Fatalf("after clearing its own: %v", got)
 	}
 }

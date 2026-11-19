@@ -17,14 +17,15 @@ func TestLoadDefaults(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := Config{
-		Auth:         AuthNone,
-		Listen:       ":8868",
-		DataDir:      "/data",
-		DownloadDir:  "/downloads",
-		Concurrency:  2,
-		JobHistory:   200,
-		YtDlp:        "/usr/local/bin/yt-dlp",
-		SubsInterval: 6 * time.Hour,
+		Auth:          AuthNone,
+		Listen:        ":8868",
+		DataDir:       "/data",
+		DownloadDir:   "/downloads",
+		Concurrency:   2,
+		JobHistory:    200,
+		SubJobHistory: 20,
+		YtDlp:         "/usr/local/bin/yt-dlp",
+		SubsInterval:  6 * time.Hour,
 	}
 	if !reflect.DeepEqual(c, want) {
 		t.Fatalf("got %+v, want %+v", c, want)

@@ -83,6 +83,7 @@ func serve() error {
 		Runner:      runner,
 		Workers:     cfg.Concurrency,
 		History:     cfg.JobHistory,
+		SubHistory:  cfg.SubJobHistory,
 		DownloadDir: cfg.DownloadDir,
 		TempRoot:    filepath.Join(cfg.DataDir, "tmp"),
 		ArchiveDir:  filepath.Join(cfg.DataDir, "archive"),
@@ -129,6 +130,10 @@ func serve() error {
 			SessionKey:   o.SessionKey,
 		}, log), o.Gravatar)
 	}
+	// Albums the saved jobs downloaded go in the archives before the job
+	// history is trimmed to its limits.
+	subscriptions.NoteAlbums()
+	mgr.TrimHistory()
 	mgr.SetOnFinish(subscriptions.JobFinished)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)

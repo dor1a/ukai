@@ -61,7 +61,12 @@ func (s *stubSubs) List() []subs.View {
 
 func subsServer(t *testing.T, sub *stubSubs) http.Handler {
 	t.Helper()
-	s, err := New(&stubJobs{}, nil, "", nil, "test")
+	return subsServerWith(t, sub, &stubJobs{})
+}
+
+func subsServerWith(t *testing.T, sub *stubSubs, j *stubJobs) http.Handler {
+	t.Helper()
+	s, err := New(j, nil, "", nil, "test")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -108,7 +113,7 @@ func TestSubsNeedTurningOn(t *testing.T) {
 func TestSubsPage(t *testing.T) {
 	b := do(subsServer(t, sampleSubs()), "GET", "/subs", nil, nil).Body.String()
 	for _, want := range []string{
-		"<title>Subscriptions · ukai</title>", `<a href="/subs" aria-current="page">Subscriptions</a>`,
+		"<title>Subscriptions - ukai</title>", `<a href="/subs" aria-current="page">Subscriptions</a>`,
 		`name="mode" value="all" checked`, `<option value="1080">1080p</option>`, `<option value="mp3-320">MP3 320 kbps</option>`,
 		"2 subscriptions, each checked every 6h",
 		">Band</a>", "Folder Band · youtube.com/@band/videos", "12 queued · checked 1 h ago · next in 5h 0m", `action="/subs/s1/pause"`,
@@ -120,8 +125,8 @@ func TestSubsPage(t *testing.T) {
 			t.Errorf("page lacks %q", want)
 		}
 	}
-	if strings.Contains(b, `hx-get="/subs/list"`) {
-		t.Error("the list polls with no check running")
+	if !strings.Contains(b, `hx-trigger="every 30s"`) {
+		t.Error("with no check running the list should look again only every 30s")
 	}
 	l := sampleSubs()
 	l.views[0].Checking = true
@@ -202,11 +207,152 @@ func TestJobRowsNameTheirSubscription(t *testing.T) {
 	}
 }
 
+// subJobs has two downloads of s1, one running, one of a subscription that
+// is gone, and one no subscription queued.
+func subJobs() *stubJobs {
+	t0 := time.Date(2026, 11, 15, 12, 0, 0, 0, time.UTC)
+	of := func(v jobs.View, id, name string) jobs.View {
+		v.Sub, v.SubName = id, name
+		if !v.Active() {
+			v.FinishedAt = v.CreatedAt.Add(30 * time.Second)
+		}
+		return v
+	}
+	return &stubJobs{views: []jobs.View{
+		of(view("j4", "Band live", "Band", store.KindVideo, store.Running, t0.Add(4*time.Minute)), "s1", "Band"),
+		of(view("j3", "Band song", "Band", store.KindVideo, store.Done, t0.Add(3*time.Minute), "Band/Band song [j3] 1920x1080.webm"), "s1", "Band"),
+		of(view("j2", "Old upload", "Old", store.KindVideo, store.Done, t0.Add(2*time.Minute)), "s0", "Old channel"),
+		view("j1", "Own pick", "Other", store.KindAudio, store.Done, t0.Add(time.Minute)),
+	}}
+}
+
+func TestSubsListTheirDownloads(t *testing.T) {
+	j := subJobs()
+	h := subsServerWith(t, sampleSubs(), j)
+
+	b := do(h, "GET", "/jobs", nil, nil).Body.String()
+	if got := titles(b); strings.Join(got, ", ") != "Old upload, Own pick" {
+		t.Fatalf("Downloads lists %v", got)
+	}
+	if !strings.Contains(b, `<span class="badge sub-name" title="Subscription">Old channel</span>`) {
+		t.Fatalf("a download of a removed subscription lost its badge:\n%s", b)
+	}
+
+	b = do(h, "GET", "/subs/list", nil, htmx).Body.String()
+	if got := titles(b); strings.Join(got, ", ") != "Band, Band live, Band song, https://www.youtube.com/@quiet/videos" {
+		t.Fatalf("subscriptions list %v", got)
+	}
+	for _, want := range []string{
+		`<details class="sub-jobs" data-sub="s1" open>`,
+		`<summary>2 downloads · 1 in progress</summary>`,
+		`action="/subs/s1/clear"`, `data-files="1"`,
+		`hx-target="#subs"`, `<input type="hidden" name="from" value="subs">`,
+		`hx-trigger="every 2s"`,
+	} {
+		if !strings.Contains(b, want) {
+			t.Errorf("missing %s", want)
+		}
+	}
+	if strings.Contains(b, "sub-name") || strings.Contains(b, `data-sub="s2"`) {
+		t.Errorf("a subscription's row names it again, or s2 got a list:\n%s", b)
+	}
+
+	j.views[0].State = store.Done
+	b = do(h, "GET", "/subs/list", nil, htmx).Body.String()
+	if !strings.Contains(b, `<details class="sub-jobs" data-sub="s1">`) || !strings.Contains(b, `hx-trigger="every 30s"`) {
+		t.Fatalf("with nothing running the list should be folded and still:\n%s", b)
+	}
+}
+
+func TestSubDownloadButtons(t *testing.T) {
+	j := subJobs()
+	h := subsServerWith(t, sampleSubs(), j)
+	from := url.Values{"from": {"subs"}}
+	rec := do(h, "POST", "/jobs/j3/retry", from, htmx)
+	if rec.Code != 200 || !strings.Contains(rec.Body.String(), `<section id="subs"`) {
+		t.Fatalf("retry from a subscription: %d\n%s", rec.Code, rec.Body.String())
+	}
+	if rec := do(h, "POST", "/jobs/j3/retry", from, nil); rec.Code != http.StatusSeeOther || rec.Header().Get("Location") != "/subs" {
+		t.Fatalf("form retry from a subscription: %d %q", rec.Code, rec.Header().Get("Location"))
+	}
+	if strings.Join(j.retried, ", ") != "j3, j3" {
+		t.Fatalf("retried %v", j.retried)
+	}
+
+	if rec := do(h, "POST", "/subs/s1/clear", url.Values{"files": {"1"}}, htmx); rec.Code != 200 {
+		t.Fatalf("clear s1: status %d", rec.Code)
+	}
+	if rec := do(h, "POST", "/subs/nope/clear", nil, nil); rec.Code != http.StatusNotFound {
+		t.Fatalf("clear an unknown subscription: status %d", rec.Code)
+	}
+	do(h, "POST", "/jobs/clear", nil, htmx)
+	if j.cleared != 2 || !j.clearedFiles[0] || j.clearedFiles[1] {
+		t.Fatalf("cleared %d times, files %v", j.cleared, j.clearedFiles)
+	}
+	for i, want := range []map[string]bool{
+		{"s1": true, "s2": false, "": false, "s0": false},
+		{"s1": false, "s2": false, "": true, "s0": true},
+	} {
+		for sub, in := range want {
+			if got := j.clearedIn[i](sub, time.Time{}); got != in {
+				t.Errorf("clear %d takes %q = %v, want %v", i, sub, got, in)
+			}
+		}
+	}
+}
+
+// Clear finished takes only the jobs that had finished when the page drew it.
+func TestClearTakesWhatThePageShowed(t *testing.T) {
+	j := subJobs()
+	h := subsServerWith(t, sampleSubs(), j)
+	shown := "2026-11-15T12:03:30Z" // j3, the last of s1's to finish
+	if b := do(h, "GET", "/subs/list", nil, htmx).Body.String(); !strings.Contains(b, `<input type="hidden" name="upto" value="`+shown+`">`) {
+		t.Fatalf("the clear form lacks the time:\n%s", b)
+	}
+	if b := do(h, "GET", "/jobs", nil, nil).Body.String(); !strings.Contains(b, `<input type="hidden" name="upto" value="2026-11-15T12:02:30Z">`) {
+		t.Fatalf("the Downloads clear form lacks the time:\n%s", b)
+	}
+	at, _ := time.Parse(time.RFC3339Nano, shown)
+	do(h, "POST", "/subs/s1/clear", url.Values{"upto": {shown}}, htmx)
+	do(h, "POST", "/jobs/clear", nil, htmx)
+	do(h, "POST", "/subs/s1/clear", url.Values{"upto": {"yesterday"}}, htmx)
+	if len(j.clearedIn) != 3 {
+		t.Fatalf("cleared %d times", len(j.clearedIn))
+	}
+	for i, c := range []struct {
+		sub  string
+		at   time.Time
+		want bool
+	}{
+		{"s1", at, true}, {"s1", at.Add(time.Nanosecond), false}, {"s1", time.Time{}, true},
+	} {
+		if got := j.clearedIn[0](c.sub, c.at); got != c.want {
+			t.Errorf("case %d: clear takes %v at %v = %v", i, c.sub, c.at, got)
+		}
+	}
+	if !j.clearedIn[1]("", time.Now().Add(time.Hour)) {
+		t.Error("a form without the time should take every finished job")
+	}
+	if j.clearedIn[2]("s1", time.Time{}) {
+		t.Error("a bad time should take nothing")
+	}
+}
+
+func TestDownloadsListEverythingWithoutSubs(t *testing.T) {
+	b := do(server(t, subJobs()), "GET", "/jobs", nil, nil).Body.String()
+	if got := titles(b); len(got) != 4 {
+		t.Fatalf("Downloads lists %v", got)
+	}
+}
+
 func TestShortDuration(t *testing.T) {
-	for d, want := range map[time.Duration]string{6 * time.Hour: "6h", 90 * time.Minute: "1h30m", 10 * time.Minute: "10m", 168 * time.Hour: "168h"} {
-		if got := shortDuration(d); got != want {
+	for d, want := range map[time.Duration]string{6 * time.Hour: "6h", 90 * time.Minute: "1h 30m", 10 * time.Minute: "10m", 168 * time.Hour: "168h"} {
+		if got := shortDuration(english, d); got != want {
 			t.Errorf("shortDuration(%v) = %q, want %q", d, got, want)
 		}
+	}
+	if got := shortDuration(korean, 90*time.Minute); got != "1시간 30분" {
+		t.Errorf("shortDuration in Korean = %q", got)
 	}
 }
 
@@ -216,15 +362,18 @@ func TestRelativeTimes(t *testing.T) {
 		10 * time.Second: "just now", 5 * time.Minute: "5 min ago", 3 * time.Hour: "3 h ago",
 		50 * time.Hour: "2 d ago",
 	} {
-		if got := ago(now.Add(-d), now); got != want {
+		if got := ago(english, now.Add(-d), now); got != want {
 			t.Errorf("ago(-%v) = %q, want %q", d, got, want)
 		}
 	}
-	if got := ago(now.Add(-10*24*time.Hour), now); !strings.HasPrefix(got, "2026-11-0") {
+	if got := ago(korean, now.Add(-5*time.Minute), now); got != "5분 전" {
+		t.Errorf("ago in Korean = %q", got)
+	}
+	if got := ago(english, now.Add(-10*24*time.Hour), now); !strings.HasPrefix(got, "2026-11-0") {
 		t.Errorf("ago of ten days = %q, want a date", got)
 	}
 	for d, want := range map[time.Duration]string{30 * time.Second: "1m", 59 * time.Minute: "59m", 5*time.Hour + 57*time.Minute: "5h 57m"} {
-		if got := until(d); got != want {
+		if got := until(english, d); got != want {
 			t.Errorf("until(%v) = %q, want %q", d, got, want)
 		}
 	}

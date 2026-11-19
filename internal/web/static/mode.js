@@ -29,7 +29,10 @@
     function refresh() {
       var dark = current() === "dark";
       button.setAttribute("data-icon", dark ? "sun" : "moon");
-      var label = dark ? "Switch to light mode" : "Switch to dark mode";
+      // The page puts both labels on the button in its own language.
+      var label = dark
+        ? button.getAttribute("data-to-light") || "Switch to light mode"
+        : button.getAttribute("data-to-dark") || "Switch to dark mode";
       button.setAttribute("aria-label", label);
       button.setAttribute("title", label);
     }

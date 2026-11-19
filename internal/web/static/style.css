@@ -102,7 +102,8 @@ body {
 
 main.wrap { padding: 24px 0 40px; }
 
-footer { color: var(--muted); font-size: 13px; text-align: center; padding: 4px 0 28px; }
+/* The colophon ends this far up, level with the middle of the mode toggle. */
+footer { color: var(--muted); font-size: 13px; text-align: center; padding: 4px 0 calc(32px + env(safe-area-inset-bottom, 0px)); }
 .colophon { display: flex; justify-content: center; align-items: center; gap: 8px; }
 .colophon a { display: inline-flex; color: inherit; }
 .colophon a:hover { color: var(--text); }
@@ -118,7 +119,15 @@ input[type="url"], input[type="text"], input[type="search"], textarea, select {
   font: inherit;
 }
 input[type="url"], input[type="text"], textarea { padding: 10px 12px; min-width: 0; }
-select { padding: 6px 10px; }
+/* The browser's own arrow sits on the rounded edge, so the select draws one. */
+select {
+  appearance: none;
+  padding: 6px 30px 6px 10px;
+  background-image: linear-gradient(45deg, transparent 50%, var(--muted) 50%), linear-gradient(135deg, var(--muted) 50%, transparent 50%);
+  background-position: calc(100% - 17px) 55%, calc(100% - 12px) 55%;
+  background-size: 5px 5px;
+  background-repeat: no-repeat;
+}
 input:focus-visible, textarea:focus-visible, select:focus-visible { outline: 2px solid var(--accent); outline-offset: 0; border-color: transparent; }
 
 textarea { resize: vertical; min-height: 46px; line-height: 1.45; }
@@ -169,7 +178,35 @@ button.small { padding: 3px 12px; font-size: 13px; }
 .icon-btn svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
 .icon-btn[aria-expanded="true"] { color: var(--accent); background: var(--accent-weak); }
 
-.brand + #mode-toggle { margin-left: auto; }
+.brand + .lang-menu { margin-left: auto; }
+.tabs + .lang-menu { margin-left: -12px; }
+
+/* The light and dark toggle floats at the bottom right, as in noroshi. */
+.mode-toggle {
+  position: fixed;
+  right: 20px;
+  bottom: calc(20px + env(safe-area-inset-bottom, 0px));
+  z-index: 10;
+  width: 44px;
+  height: 44px;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  background: var(--panel);
+  color: var(--text);
+  border: 1px solid var(--line);
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.18);
+}
+.mode-toggle[hidden] { display: none; }
+.mode-toggle:hover { border-color: var(--accent); color: var(--accent); }
+.mode-toggle:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+.mode-toggle svg { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+
+/* The language menu under the globe in the top bar marks the page's own. */
+.lang-menu .menu { min-width: 140px; margin: 0; }
+.lang-menu .menu-item[aria-current] { color: var(--accent); font-weight: 600; }
+.lang-menu .menu-item[aria-current]::after { content: "✓"; float: right; }
 #mode-toggle .i-moon { display: none; }
 #mode-toggle[data-icon="moon"] .i-moon { display: block; }
 #mode-toggle[data-icon="moon"] .i-sun { display: none; }
@@ -222,7 +259,7 @@ button.small { padding: 3px 12px; font-size: 13px; }
 .indicator { display: none; color: var(--muted); font-size: 14px; }
 .indicator.htmx-request { display: inline; }
 
-.account { display: flex; align-items: center; gap: 4px; padding-left: 12px; border-left: 1px solid var(--line); }
+.account { display: flex; align-items: center; gap: 8px; padding-left: 12px; border-left: 1px solid var(--line); }
 .account .who { display: inline-flex; align-items: center; gap: 8px; max-width: 200px; color: var(--text); font-size: 14px; font-weight: 600; }
 .account .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .face {
@@ -409,6 +446,13 @@ details.add-sub[open] > summary { margin-bottom: 12px; }
 
 .row.sub { grid-template-columns: 44px minmax(0, 1fr) auto auto; }
 .row.paused .avatar, .row.paused .main { opacity: 0.6; }
+
+/* A subscription's downloads, folded under its row. */
+details.sub-jobs { grid-column: 1 / -1; margin-top: 2px; }
+details.sub-jobs > summary { width: max-content; cursor: pointer; color: var(--muted); font-size: 13px; }
+details.sub-jobs[open] > summary { margin-bottom: 8px; }
+details.sub-jobs .sub-clear { margin: 0 0 8px; }
+details.sub-jobs .rows { background: var(--bg); box-shadow: none; }
 
 .avatar {
   width: 44px;

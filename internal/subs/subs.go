@@ -315,6 +315,14 @@ func (m *Manager) JobFinished(j store.Job) {
 	}
 	switch j.State {
 	case store.Done:
+		// A channel's Releases tab lists albums. Downloading one archives
+		// its videos, not the album, so the album goes in too and the next
+		// check passes it by.
+		if list := playlistID(j.URL); list != "" {
+			if err := m.appendArchive(j.Sub, playlistKey, list); err != nil {
+				m.log.Error("cannot add the playlist to the download archive", "sub", j.Sub, "url", j.URL, "err", err)
+			}
+		}
 		if !s.Skipped[j.URL] && s.Failures[j.URL] == 0 {
 			return
 		}
@@ -482,6 +490,7 @@ func (m *Manager) check(ctx context.Context, id string) {
 		m.finish(id, func(s *store.Sub) { s.CheckError = "cannot read the download archive; see the ukai log" })
 		return
 	}
+	m.noteAlbums(id, archived)
 
 	// A new-only subscription notes what the channel has on its first check.
 	// The archive appears whole or not at all, even for an empty channel, so
@@ -737,6 +746,78 @@ func newID(now time.Time) string {
 func isPlaylist(rawURL string) bool {
 	u, err := url.Parse(rawURL)
 	return err == nil && u.Query().Get("list") != ""
+}
+
+// playlistKey is the extractor key yt-dlp lists a YouTube playlist entry
+// under, as a channel's Releases tab does, in lower case.
+const playlistKey = "youtubetab"
+
+// validListID allows the characters of a YouTube playlist ID.
+var validListID = regexp.MustCompile(`^[0-9A-Za-z_-]{1,128}$`)
+
+// playlistID returns the playlist ID of a playlist URL, or "" for anything
+// else, an ID that could not go on one archive line included.
+func playlistID(rawURL string) string {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return ""
+	}
+	if list := u.Query().Get("list"); validListID.MatchString(list) {
+		return list
+	}
+	return ""
+}
+
+// appendArchive adds an "<extractor> <id>" line to a subscription's download
+// archive, the way yt-dlp adds a video it downloaded.
+// NoteAlbums notes in every subscription's archive the albums its listed,
+// done jobs downloaded. Albums downloaded by 0.1.3 and older are not in the
+// archive yet, so ukai runs it before it first trims the job history.
+func (m *Manager) NoteAlbums() {
+	m.mu.Lock()
+	ids := make([]string, 0, len(m.subs))
+	for _, s := range m.subs {
+		ids = append(ids, s.ID)
+	}
+	m.mu.Unlock()
+	for _, id := range ids {
+		archived, _, err := m.readArchive(id)
+		if err != nil {
+			m.log.Error("cannot read the download archive", "sub", id, "err", err)
+			continue
+		}
+		m.noteAlbums(id, archived)
+	}
+}
+
+// noteAlbums adds to the archive each album that a listed, done job of the
+// subscription downloaded and the archive lacks. Albums downloaded before
+// ukai noted them (0.1.3 and older) are noted this way while their jobs are
+// still listed. archived gains them too.
+func (m *Manager) noteAlbums(id string, archived map[string]bool) {
+	for _, v := range m.opt.Queue.List() {
+		list := playlistID(v.URL)
+		if v.Sub != id || v.State != store.Done || list == "" || archived[list] {
+			continue
+		}
+		if err := m.appendArchive(id, playlistKey, list); err != nil {
+			m.log.Error("cannot add the playlist to the download archive", "sub", id, "url", v.URL, "err", err)
+			return
+		}
+		archived[list] = true
+	}
+}
+
+func (m *Manager) appendArchive(sub, key, id string) error {
+	f, err := m.archive.OpenFile(sub+".txt", os.O_WRONLY|os.O_APPEND|os.O_CREATE, 0o640)
+	if err != nil {
+		return err
+	}
+	_, err = fmt.Fprintf(f, "%s %s\n", key, id)
+	if cerr := f.Close(); err == nil {
+		err = cerr
+	}
+	return err
 }
 
 // channelVideos points a YouTube channel's main page at its Videos tab. The

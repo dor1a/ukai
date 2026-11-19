@@ -2,9 +2,9 @@ package web
 
 import (
 	"errors"
-	"fmt"
 	"hash/fnv"
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -44,6 +44,7 @@ type subsPage struct {
 	Version string
 	User    *account
 	Page    string
+	Back    string
 	Form    subForm
 	Heights []ytdlp.Option
 	MP3     []ytdlp.Option
@@ -54,6 +55,9 @@ type subsPage struct {
 type subsList struct {
 	Subs     []subRow
 	Checking bool
+	// Active is set while a subscription's download is queued or running,
+	// so the list refreshes as it goes.
+	Active   bool
 	Interval string
 	Error    string
 }
@@ -68,52 +72,92 @@ type subRow struct {
 	Initial string
 	Tone    int
 	Detail  string
+	// Jobs are the subscription's downloads, newest first, folded under it
+	// unless one is queued or running (Open). Finished counts the ones that
+	// can be cleared, FinishedFiles those with downloaded files.
+	Jobs          []row
+	Open          bool
+	Running       int
+	Finished      int
+	FinishedFiles int
+	// Upto is when the last finished one finished, as in listData.
+	Upto string
 }
 
 // subsList builds the list. poll makes it refresh once more even when no
 // check is running yet, after a button that starts one.
-func (s *Server) subsList(errMsg string, poll bool) subsList {
-	l := subsList{Interval: shortDuration(s.subsInterval), Error: errMsg, Checking: poll}
+func (s *Server) subsList(lg lang, errMsg string, poll bool) subsList {
+	l := subsList{Interval: shortDuration(lg, s.subsInterval), Error: errMsg, Checking: poll}
+	bySub := map[string][]jobs.View{}
+	for _, v := range s.jobs.List() {
+		if v.Sub != "" {
+			bySub[v.Sub] = append(bySub[v.Sub], v)
+		}
+	}
 	for _, v := range s.subs.List() {
 		r := subRow{
 			ID:       v.ID,
 			Name:     cmpOr(v.Name, v.URL),
 			URL:      v.URL,
-			Mode:     map[store.SubMode]string{store.SubAll: "Everything", store.SubNew: "New only"}[v.Mode],
-			Kind:     label(string(v.Kind)),
-			Quality:  ytdlp.QualityLabel(v.Kind == store.KindAudio, cmpOr(v.Quality, "best")),
+			Mode:     lg.T(map[store.SubMode]string{store.SubAll: "Everything", store.SubNew: "New only"}[v.Mode]),
+			Kind:     lg.T(label(string(v.Kind))),
+			Quality:  qualityText(lg, v.Kind == store.KindAudio, v.Quality),
 			Paused:   v.Paused,
 			Checking: v.Checking,
-			Error:    v.CheckError,
+			Error:    lg.saved(checkErrors, v.CheckError),
 			Added:    v.CreatedAt.Local().Format("2006-01-02"),
 		}
 		r.Avatar = httpsURL(v.Avatar)
 		r.Initial, r.Tone = initial(r.Name), tone(r.Name)
 		var detail []string
 		if v.Folder != "" {
-			detail = append(detail, "Folder "+v.Folder)
+			detail = append(detail, lg.F("Folder %s", v.Folder))
 		}
 		detail = append(detail, strings.TrimPrefix(strings.TrimPrefix(v.URL, "https://"), "www."))
 		r.Detail = strings.Join(detail, " · ")
 		now := s.clock()
-		parts := []string{strconv.Itoa(v.Queued) + " queued"}
+		parts := []string{lg.F("%d queued", v.Queued)}
 		switch {
 		case v.CheckedAt.IsZero():
-			parts = append(parts, "not checked yet")
+			parts = append(parts, lg.T("not checked yet"))
 		default:
-			parts = append(parts, "checked "+ago(v.CheckedAt, now))
+			parts = append(parts, lg.F("checked %s", ago(lg, v.CheckedAt, now)))
 		}
 		switch next := v.CheckedAt.Add(s.subsInterval).Sub(now); {
 		case v.Paused, v.Checking:
 		case v.CheckedAt.IsZero() || next <= 0:
-			parts = append(parts, "check due")
+			parts = append(parts, lg.T("check due"))
 		default:
-			parts = append(parts, "next in "+until(next))
+			parts = append(parts, lg.F("next in %s", until(lg, next)))
 		}
 		if !v.Ready && v.Mode == store.SubNew && v.CheckError == "" {
-			parts = append(parts, "noting what the channel already has")
+			parts = append(parts, lg.T("noting what the channel already has"))
 		}
 		r.Status = strings.Join(parts, " · ")
+		var latest time.Time
+		for _, jv := range bySub[v.ID] {
+			jr := s.toRow(lg, jv)
+			// The row sits under its subscription, which names it already.
+			jr.Sub, jr.Target, jr.From = "", "#subs", "subs"
+			r.Jobs = append(r.Jobs, jr)
+			switch {
+			case jv.Active():
+				r.Running++
+			default:
+				r.Finished++
+				if len(jv.Files) > 0 {
+					r.FinishedFiles++
+				}
+				if jv.FinishedAt.After(latest) {
+					latest = jv.FinishedAt
+				}
+			}
+		}
+		if r.Finished > 0 {
+			r.Upto = latest.UTC().Format(time.RFC3339Nano)
+		}
+		r.Open = r.Running > 0
+		l.Active = l.Active || r.Running > 0
 		l.Subs = append(l.Subs, r)
 		if v.Checking {
 			l.Checking = true
@@ -123,12 +167,12 @@ func (s *Server) subsList(errMsg string, poll bool) subsList {
 }
 
 // until says how long d is, e.g. "5h 57m", rounded up to a minute.
-func until(d time.Duration) string {
+func until(l lang, d time.Duration) string {
 	m := int((d + time.Minute - 1) / time.Minute)
 	if m >= 60 {
-		return fmt.Sprintf("%dh %dm", m/60, m%60)
+		return l.F("%dh %dm", m/60, m%60)
 	}
-	return fmt.Sprintf("%dm", m)
+	return l.F("%dm", m)
 }
 
 // initial is the first letter of name in upper case.
@@ -148,20 +192,21 @@ func tone(name string) int {
 	return int(h.Sum32() % 6)
 }
 
-// shortDuration prints 6h0m0s as 6h and 1h30m0s as 1h30m.
-func shortDuration(d time.Duration) string {
-	out := d.String()
-	if strings.HasSuffix(out, "m0s") {
-		out = strings.TrimSuffix(out, "0s")
+// shortDuration prints 6h0m0s as 6h and 1h30m0s as 1h 30m. The interval is
+// whole minutes, from 10m to 168h.
+func shortDuration(l lang, d time.Duration) string {
+	h, m := int(d/time.Hour), int(d%time.Hour/time.Minute)
+	switch {
+	case h > 0 && m > 0:
+		return l.F("%dh %dm", h, m)
+	case h > 0:
+		return l.F("%dh", h)
 	}
-	if strings.HasSuffix(out, "h0m") {
-		out = strings.TrimSuffix(out, "0m")
-	}
-	return out
+	return l.F("%dm", m)
 }
 
 func (s *Server) subsPage(r *http.Request, f subForm, errMsg string) subsPage {
-	p := subsPage{Version: s.version, User: s.account(r), Page: "subs", Form: f, List: s.subsList("", false), Error: errMsg}
+	p := subsPage{Version: s.version, User: s.account(r), Page: "subs", Back: "/subs", Form: f, List: s.subsList(requestLang(r), "", false), Error: errMsg}
 	if p.Form.VideoQuality == "" {
 		p.Form.VideoQuality = "best"
 	}
@@ -184,7 +229,7 @@ func (s *Server) subsIndex(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	s.render(w, http.StatusOK, "subs-page", s.subsPage(r, subForm{}, ""))
+	s.render(w, r, http.StatusOK, "subs-page", s.subsPage(r, subForm{}, ""))
 }
 
 func (s *Server) subsFragment(w http.ResponseWriter, r *http.Request) {
@@ -192,7 +237,7 @@ func (s *Server) subsFragment(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	s.render(w, http.StatusOK, "subs", s.subsList("", false))
+	s.render(w, r, http.StatusOK, "subs", s.subsList(requestLang(r), "", false))
 }
 
 func (s *Server) subscribe(w http.ResponseWriter, r *http.Request) {
@@ -218,15 +263,16 @@ func (s *Server) subscribe(w http.ResponseWriter, r *http.Request) {
 		quality = f.AudioQuality
 	}
 	_, err := s.subs.Add(f.URL, f.Name, store.SubMode(cmpOr(f.Mode, string(store.SubAll))), store.Kind(f.Kind), quality)
-	msg := s.subsMessage(err)
+	l := requestLang(r)
+	msg := s.subsMessage(l, err)
 	switch {
 	case isHTMX(r) && msg != "":
 		w.Header().Set("X-Ukai-Error", "1")
-		s.render(w, http.StatusOK, "subs", s.subsList(msg, false))
+		s.render(w, r, http.StatusOK, "subs", s.subsList(l, msg, false))
 	case isHTMX(r):
-		s.render(w, http.StatusOK, "subs", s.subsList("", true))
+		s.render(w, r, http.StatusOK, "subs", s.subsList(l, "", true))
 	case msg != "":
-		s.render(w, http.StatusBadRequest, "subs-page", s.subsPage(r, f, msg))
+		s.render(w, r, http.StatusBadRequest, "subs-page", s.subsPage(r, f, msg))
 	default:
 		http.Redirect(w, r, "/subs", http.StatusSeeOther)
 	}
@@ -256,31 +302,80 @@ func (s *Server) subAct(w http.ResponseWriter, r *http.Request, starts bool, do 
 		return
 	}
 	err := do(r.PathValue("id"))
-	msg := s.subsMessage(err)
+	s.subsAfter(w, r, err, s.subsMessage(requestLang(r), err), starts)
+}
+
+// subsAfter answers a button on the Subscriptions page with the list again,
+// or without scripts with the page and the error. starts says the button
+// started a check, so the list refreshes to show it.
+func (s *Server) subsAfter(w http.ResponseWriter, r *http.Request, err error, msg string, starts bool) {
 	switch {
 	case isHTMX(r):
-		s.render(w, http.StatusOK, "subs", s.subsList(msg, starts && err == nil))
-	case errors.Is(err, subs.ErrNotFound):
-		s.render(w, http.StatusNotFound, "subs-page", s.subsPage(r, subForm{}, msg))
+		s.render(w, r, http.StatusOK, "subs", s.subsList(requestLang(r), msg, starts && err == nil))
+	case errors.Is(err, subs.ErrNotFound), errors.Is(err, jobs.ErrNotFound):
+		s.render(w, r, http.StatusNotFound, "subs-page", s.subsPage(r, subForm{}, msg))
 	case msg != "":
-		s.render(w, http.StatusConflict, "subs-page", s.subsPage(r, subForm{}, msg))
+		s.render(w, r, http.StatusConflict, "subs-page", s.subsPage(r, subForm{}, msg))
 	default:
 		http.Redirect(w, r, "/subs", http.StatusSeeOther)
 	}
 }
 
+// subClear takes a subscription's finished downloads off its list, and
+// deletes their files too when the form posts files=1.
+func (s *Server) subClear(w http.ResponseWriter, r *http.Request) {
+	if s.subs == nil {
+		http.NotFound(w, r)
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 16<<10)
+	if err := r.ParseForm(); err != nil {
+		http.Error(w, "bad form", http.StatusBadRequest)
+		return
+	}
+	id := r.PathValue("id")
+	if !slices.ContainsFunc(s.subs.List(), func(v subs.View) bool { return v.ID == id }) {
+		err := subs.ErrNotFound
+		s.subsAfter(w, r, err, s.subsMessage(requestLang(r), err), false)
+		return
+	}
+	shown := shownBefore(r)
+	_, err := s.jobs.ClearFinished(deleteFiles(r), func(sub string, at time.Time) bool { return sub == id && shown(at) })
+	s.subsAfter(w, r, err, s.userMessage(requestLang(r), err), false)
+}
+
+// liveSubs holds the ID of every subscription, and is nil when
+// subscriptions are off.
+func (s *Server) liveSubs() map[string]bool {
+	if s.subs == nil {
+		return nil
+	}
+	live := map[string]bool{}
+	for _, v := range s.subs.List() {
+		live[v.ID] = true
+	}
+	return live
+}
+
+// onDownloads reports whether a job with this subscription ID belongs on the
+// Downloads list: one no subscription queued, or one whose subscription is
+// gone and so has no row to sit under.
+func onDownloads(live map[string]bool) func(sub string) bool {
+	return func(sub string) bool { return sub == "" || !live[sub] }
+}
+
 // subsMessage turns a subscription error into text for the page.
-func (s *Server) subsMessage(err error) string {
+func (s *Server) subsMessage(l lang, err error) string {
 	switch {
 	case err == nil:
 		return ""
 	case errors.Is(err, subs.ErrBadMode), errors.Is(err, subs.ErrBadQuality), errors.Is(err, subs.ErrExists),
 		errors.Is(err, subs.ErrNotFound), errors.Is(err, jobs.ErrBadURL), errors.Is(err, jobs.ErrBadKind):
-		return label(err.Error()) + "."
+		return l.T(label(err.Error()) + ".")
 	case errors.Is(err, subs.ErrSave):
-		return label(err.Error()) + ". See the ukai log."
+		return l.T(label(err.Error()) + ". See the ukai log.")
 	default:
 		s.log.Error("subscription request failed", "err", err)
-		return "Something went wrong on the server. See the ukai log."
+		return l.T("Something went wrong on the server. See the ukai log.")
 	}
 }

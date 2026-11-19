@@ -1,32 +1,43 @@
 {{define "jobs" -}}
 <section id="jobs" class="list" aria-live="polite" hx-sync="this:drop"{{if or .Active .Unsaved}} hx-get="{{.Poll}}" hx-trigger="every 2s" hx-swap="outerHTML"{{end}}>
-  {{with .Unsaved}}<p class="error" role="alert">ukai cannot save the job list to disk (failing since {{.}}) and keeps trying. Until a save works, a restart would lose the changes since then: jobs that finished or were canceled would be queued and run again. See the ukai log.</p>{{end}}
+  {{with .Unsaved}}<p class="error" role="alert">{{tf "ukai cannot save the job list to disk (failing since %s) and keeps trying. Until a save works, a restart would lose the changes since then: jobs that finished or were canceled would be queued and run again. See the ukai log." .}}</p>{{end}}
   {{with .Error}}<p class="error" role="alert">{{.}}</p>{{end}}
   <div class="list-head">
     {{/* The state chips belong to the filter form (form="filter"), so its
          searches carry the state, but sit here at the head of the list. */}}
-    <div class="chips" role="radiogroup" aria-label="State" hx-get="/jobs" hx-trigger="change" hx-include="#filter" hx-target="#jobs" hx-swap="outerHTML" hx-sync="#jobs:replace">
-      <label><input type="radio" name="state" value="" form="filter"{{if eq .Filter.State ""}} checked{{end}}><span>All <b>{{.Counts.All}}</b></span></label>
-      <label><input type="radio" name="state" value="active" form="filter"{{if eq .Filter.State "active"}} checked{{end}}><span>In progress <b>{{.Counts.Active}}</b></span></label>
-      <label><input type="radio" name="state" value="done" form="filter"{{if eq .Filter.State "done"}} checked{{end}}><span>Done <b>{{.Counts.Done}}</b></span></label>
-      <label><input type="radio" name="state" value="failed" form="filter"{{if eq .Filter.State "failed"}} checked{{end}}><span>Failed <b>{{.Counts.Failed}}</b></span></label>
+    <div class="chips" role="radiogroup" aria-label="{{t "State"}}" hx-get="/jobs" hx-trigger="change" hx-include="#filter" hx-target="#jobs" hx-swap="outerHTML" hx-sync="#jobs:replace">
+      <label><input type="radio" name="state" value="" form="filter"{{if eq .Filter.State ""}} checked{{end}}><span>{{t "All"}} <b>{{.Counts.All}}</b></span></label>
+      <label><input type="radio" name="state" value="active" form="filter"{{if eq .Filter.State "active"}} checked{{end}}><span>{{t "In progress"}} <b>{{.Counts.Active}}</b></span></label>
+      <label><input type="radio" name="state" value="done" form="filter"{{if eq .Filter.State "done"}} checked{{end}}><span>{{t "Done"}} <b>{{.Counts.Done}}</b></span></label>
+      <label><input type="radio" name="state" value="failed" form="filter"{{if eq .Filter.State "failed"}} checked{{end}}><span>{{t "Failed"}} <b>{{.Counts.Failed}}</b></span></label>
     </div>
     {{if .Finished}}
-    <form method="post" action="/jobs/clear" hx-post="/jobs/clear" hx-target="#jobs" hx-swap="outerHTML" hx-sync="#jobs:replace" data-remove data-heading="Clear {{.Finished}} finished {{if eq .Finished 1}}download{{else}}downloads{{end}}?" data-what="Every download that is no longer queued or running leaves the list." data-files="{{.FinishedFiles}}" data-action="Clear">
+    <form method="post" action="/jobs/clear" hx-post="/jobs/clear" hx-target="#jobs" hx-swap="outerHTML" hx-sync="#jobs:replace" data-remove data-heading="{{if eq .Finished 1}}{{t "Clear 1 finished download?"}}{{else}}{{tf "Clear %d finished downloads?" .Finished}}{{end}}" data-what="{{t "Every download that is no longer queued or running leaves the list."}}" data-files="{{.FinishedFiles}}" data-action="{{t "Clear"}}">
       {{template "filterfields" .Filter}}
+      <input type="hidden" name="upto" value="{{.Upto}}">
       <input type="hidden" name="files" value="">
-      <button type="submit" class="ghost small">Clear finished</button>
+      <button type="submit" class="ghost small">{{t "Clear finished"}}</button>
     </form>
     {{end}}
   </div>
-  {{if not .Jobs}}<p class="empty">{{if .Filter.Set}}No downloads match.{{else}}No downloads yet.{{end}}</p>{{end}}
+  {{if not .Jobs}}<p class="empty">{{if .Filter.Set}}{{t "No downloads match."}}{{else}}{{t "No downloads yet."}}{{end}}</p>{{end}}
   {{if .Jobs}}<ol class="rows">
-  {{range .Jobs}}
+  {{range .Jobs}}{{template "jobrow" .}}
+  {{end}}
+  </ol>{{end}}
+</section>
+{{- end}}
+
+{{define "filterfields" -}}
+{{with .Q}}<input type="hidden" name="q" value="{{.}}">{{end}}{{with .Show}}<input type="hidden" name="show" value="{{.}}">{{end}}{{with .State}}<input type="hidden" name="state" value="{{.}}">{{end}}{{with .Order}}<input type="hidden" name="order" value="{{.}}">{{end}}
+{{- end}}
+
+{{define "jobrow" -}}
     <li class="row state-{{.StateKey}}">
       <div class="thumb">{{if .Thumbnail}}<img src="{{.Thumbnail}}" alt="" loading="lazy" width="120" height="68">{{else}}<span>{{.Kind}}</span>{{end}}</div>
       <div class="main">
         <a class="title" href="{{.URL}}" rel="noopener noreferrer" target="_blank">{{.Title}}</a>
-        <div class="meta">{{with .Meta}}<span>{{.}}</span>{{end}}{{with .Sub}}<span class="badge sub-name" title="Subscription">{{.}}</span>{{end}}</div>
+        <div class="meta">{{with .Meta}}<span>{{.}}</span>{{end}}{{with .Sub}}<span class="badge sub-name" title="{{t "Subscription"}}">{{.}}</span>{{end}}</div>
         {{if ge .Percent 0}}<progress max="100" value="{{.Percent}}">{{.Percent}}%</progress>{{end}}
         {{with .Progress}}<p class="progress">{{.}}</p>{{end}}
         {{with .Error}}<p class="job-error">{{.}}</p>{{end}}
@@ -38,25 +49,25 @@
         <time datetime="{{.WhenISO}}" title="{{.When}}">{{.Ago}}</time>
       </div>
       <div class="actions">
-        {{if .PlayURL}}<button type="button" class="icon-btn" data-play="play-{{.ID}}" aria-expanded="false" title="Play" aria-label="Play"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 5v14l11-7z"/></svg></button>{{end}}
-        {{if .SaveURL}}<a class="icon-btn" href="{{.SaveURL}}" title="Save {{.SaveName}}" aria-label="Save {{.SaveName}}"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4v11M7 10l5 5 5-5M5 20h14"/></svg></a>{{end}}
+        {{if .PlayURL}}<button type="button" class="icon-btn" data-play="play-{{.ID}}" aria-expanded="false" title="{{t "Play"}}" aria-label="{{t "Play"}}"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 5v14l11-7z"/></svg></button>{{end}}
+        {{if .SaveURL}}<a class="icon-btn" href="{{.SaveURL}}" title="{{tf "Save %s" .SaveName}}" aria-label="{{tf "Save %s" .SaveName}}"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4v11M7 10l5 5 5-5M5 20h14"/></svg></a>{{end}}
         {{if .CanCancel}}
-        <form method="post" action="/jobs/{{.ID}}/cancel" hx-post="/jobs/{{.ID}}/cancel" hx-target="#jobs" hx-swap="outerHTML" hx-sync="#jobs:replace">
-          {{template "filterfields" $.Filter}}
-          <button type="submit" class="icon-btn danger" title="Cancel" aria-label="Cancel"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="8"/><path d="M8.5 15.5l7-7"/></svg></button>
+        <form method="post" action="/jobs/{{.ID}}/cancel" hx-post="/jobs/{{.ID}}/cancel" hx-target="{{.Target}}" hx-swap="outerHTML" hx-sync="{{.Target}}:replace">
+          {{template "filterfields" .Filter}}{{with .From}}<input type="hidden" name="from" value="{{.}}">{{end}}
+          <button type="submit" class="icon-btn danger" title="{{t "Cancel"}}" aria-label="{{t "Cancel"}}"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="8"/><path d="M8.5 15.5l7-7"/></svg></button>
         </form>
         {{end}}
         {{if .CanRetry}}
-        <form method="post" action="/jobs/{{.ID}}/retry" hx-post="/jobs/{{.ID}}/retry" hx-target="#jobs" hx-swap="outerHTML" hx-sync="#jobs:replace">
-          {{template "filterfields" $.Filter}}
-          <button type="submit" class="icon-btn" title="Retry" aria-label="Retry"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 11a8 8 0 1 0-2.3 5.7M20 5v6h-6"/></svg></button>
+        <form method="post" action="/jobs/{{.ID}}/retry" hx-post="/jobs/{{.ID}}/retry" hx-target="{{.Target}}" hx-swap="outerHTML" hx-sync="{{.Target}}:replace">
+          {{template "filterfields" .Filter}}{{with .From}}<input type="hidden" name="from" value="{{.}}">{{end}}
+          <button type="submit" class="icon-btn" title="{{t "Retry"}}" aria-label="{{t "Retry"}}"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 11a8 8 0 1 0-2.3 5.7M20 5v6h-6"/></svg></button>
         </form>
         {{end}}
         {{if .CanRemove}}
-        <form method="post" action="/jobs/{{.ID}}/remove" hx-post="/jobs/{{.ID}}/remove" hx-target="#jobs" hx-swap="outerHTML" hx-sync="#jobs:replace" data-remove data-heading="Remove this download?" data-what="{{.Title}}" data-files="{{len .Files}}" data-action="Remove">
-          {{template "filterfields" $.Filter}}
+        <form method="post" action="/jobs/{{.ID}}/remove" hx-post="/jobs/{{.ID}}/remove" hx-target="{{.Target}}" hx-swap="outerHTML" hx-sync="{{.Target}}:replace" data-remove data-heading="{{t "Remove this download?"}}" data-what="{{.Title}}" data-files="{{len .Files}}" data-action="{{t "Remove"}}">
+          {{template "filterfields" .Filter}}{{with .From}}<input type="hidden" name="from" value="{{.}}">{{end}}
           <input type="hidden" name="files" value="">
-          <button type="submit" class="icon-btn danger" title="Remove" aria-label="Remove"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18"/></svg></button>
+          <button type="submit" class="icon-btn danger" title="{{t "Remove"}}" aria-label="{{t "Remove"}}"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18"/></svg></button>
         </form>
         {{end}}
       </div>
@@ -66,11 +77,4 @@
       </div>
       {{end}}
     </li>
-  {{end}}
-  </ol>{{end}}
-</section>
-{{- end}}
-
-{{define "filterfields" -}}
-{{with .Q}}<input type="hidden" name="q" value="{{.}}">{{end}}{{with .Show}}<input type="hidden" name="show" value="{{.}}">{{end}}{{with .State}}<input type="hidden" name="state" value="{{.}}">{{end}}{{with .Order}}<input type="hidden" name="order" value="{{.}}">{{end}}
 {{- end}}

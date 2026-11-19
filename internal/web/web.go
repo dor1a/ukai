@@ -43,7 +43,7 @@ type Jobs interface {
 	Cancel(id string) error
 	Retry(id string) error
 	Remove(id string, deleteFiles bool) error
-	ClearFinished(deleteFiles bool) (int, error)
+	ClearFinished(deleteFiles bool, in func(sub string, finished time.Time) bool) (int, error)
 	Get(id string) (jobs.View, bool)
 	List() []jobs.View
 	UnsavedSince() time.Time
@@ -73,7 +73,8 @@ type Server struct {
 	probes  *probes
 	log     *slog.Logger
 	version string
-	tpl     *template.Template
+	// tpls holds the templates once per language.
+	tpls map[lang]*template.Template
 	// files is the download directory, nil when files are not served.
 	files *os.Root
 	// now gives the time relative times count from. Nil means time.Now.
@@ -94,13 +95,11 @@ func New(j Jobs, p Prober, downloadDir string, log *slog.Logger, version string)
 	if log == nil {
 		log = slog.New(slog.DiscardHandler)
 	}
-	tpl, err := template.New("").Funcs(template.FuncMap{
-		"asset": func(name string) string { return "/static/" + name + "?v=" + version },
-	}).ParseFS(templateFS, "templates/*.html")
+	tpls, err := parseTemplates(version)
 	if err != nil {
 		return nil, err
 	}
-	s := &Server{jobs: j, prober: p, slots: make(chan struct{}, probeSlots), probes: newProbes(probeMax, probeKeep), log: log, version: version, tpl: tpl}
+	s := &Server{jobs: j, prober: p, slots: make(chan struct{}, probeSlots), probes: newProbes(probeMax, probeKeep), log: log, version: version, tpls: tpls}
 	if downloadDir != "" {
 		// os.Root keeps every open inside the directory, symlinks included.
 		if s.files, err = os.OpenRoot(downloadDir); err != nil {
@@ -133,6 +132,7 @@ func (s *Server) Handler() http.Handler {
 	app.HandleFunc("POST /subs/{id}/pause", s.subPause)
 	app.HandleFunc("POST /subs/{id}/resume", s.subResume)
 	app.HandleFunc("POST /subs/{id}/remove", s.subRemove)
+	app.HandleFunc("POST /subs/{id}/clear", s.subClear)
 	app.HandleFunc("POST /probe", s.probe)
 
 	mux := http.NewServeMux()
@@ -141,11 +141,14 @@ func (s *Server) Handler() http.Handler {
 		fmt.Fprintln(w, "ok")
 	})
 	mux.Handle("GET /static/", http.StripPrefix("/static/", http.FileServerFS(static)))
+	// The language works before sign-in too, on the signed-out page.
+	mux.HandleFunc("POST /lang", s.setLang)
 	if s.auth != nil {
 		mux.HandleFunc("GET /login", s.auth.Login)
 		mux.HandleFunc("GET /oauth/callback", s.auth.Callback)
 		mux.HandleFunc("GET /logout", s.auth.Logout)
 		mux.HandleFunc("GET /signed-out", s.signedOut)
+		mux.HandleFunc("GET /sign-in-failed", s.signInFailed)
 		mux.Handle("/", s.auth.Require(app))
 	} else {
 		mux.Handle("/", app)
@@ -181,9 +184,11 @@ type listData struct {
 	Filter filter
 	Poll   string
 	// Finished counts the jobs that can be removed, and FinishedFiles the
-	// finished ones with downloaded files.
+	// finished ones with downloaded files. Upto is when the last of them
+	// finished, so Clear finished takes no job that ends after the page.
 	Finished      int
 	FinishedFiles int
+	Upto          string
 	// Counts are the jobs that match the search and kind, by state, for the
 	// state chips at the head of the list.
 	Counts counts
@@ -196,7 +201,9 @@ type pageData struct {
 	// User is the signed-in user, nil without sign-in.
 	User *account
 	// Page names the tab the page belongs to; empty is Downloads.
-	Page   string
+	Page string
+	// Back is where the language buttons come back to.
+	Back   string
 	List   listData
 	Filter filter
 	URL    string
@@ -292,6 +299,7 @@ func has(list []ytdlp.Option, value string) bool {
 func (s *Server) page(r *http.Request, p pageData) pageData {
 	p.Version = s.version
 	p.User = s.account(r)
+	p.Back = home(p.Filter)
 	p.URLBox = urlBox{Value: p.URL}
 	if p.Options.Kind == "" {
 		p.Options = options(formValues{Kind: string(store.KindVideo)}, nil)
@@ -335,6 +343,13 @@ type row struct {
 	CanCancel bool
 	CanRetry  bool
 	CanRemove bool
+	// Target is the list the row's buttons refresh: #jobs on the Downloads
+	// page, #subs under a subscription, where From is "subs" so a form sent
+	// without scripts comes back there. Filter is the Downloads filter the
+	// buttons keep.
+	Target string
+	From   string
+	Filter filter
 }
 
 // fileLink is one downloaded file. URL plays it in the browser and SaveURL
@@ -422,7 +437,7 @@ func (f filter) match(v jobs.View) bool {
 	return false
 }
 
-func (s *Server) listData(f filter, errMsg string) listData {
+func (s *Server) listData(l lang, f filter, errMsg string) listData {
 	views := s.jobs.List()
 	d := listData{Jobs: make([]row, 0, len(views)), Error: errMsg, Filter: f, Poll: "/jobs"}
 	if q := f.query(); q != "" {
@@ -433,13 +448,22 @@ func (s *Server) listData(f filter, errMsg string) listData {
 	}
 	facet := f
 	facet.State = ""
+	mine := onDownloads(s.liveSubs())
+	var latest time.Time
 	for _, v := range views {
+		if !mine(v.Sub) {
+			// Subscriptions list their downloads under themselves.
+			continue
+		}
 		if v.Active() {
 			d.Active = true
 		} else {
 			d.Finished++
 			if len(v.Files) > 0 {
 				d.FinishedFiles++
+			}
+			if v.FinishedAt.After(latest) {
+				latest = v.FinishedAt
 			}
 		}
 		if facet.match(v) {
@@ -454,32 +478,38 @@ func (s *Server) listData(f filter, errMsg string) listData {
 			}
 		}
 		if f.match(v) {
-			d.Jobs = append(d.Jobs, s.toRow(v))
+			r := s.toRow(l, v)
+			r.Filter = f
+			d.Jobs = append(d.Jobs, r)
 		}
 	}
 	if f.Order == "oldest" {
 		slices.Reverse(d.Jobs)
 	}
+	if d.Finished > 0 {
+		d.Upto = latest.UTC().Format(time.RFC3339Nano)
+	}
 	return d
 }
 
-func (s *Server) toRow(v jobs.View) row {
+func (s *Server) toRow(l lang, v jobs.View) row {
 	r := row{
 		ID:        v.ID,
 		Title:     v.Title,
 		URL:       v.URL,
-		Kind:      label(string(v.Kind)),
-		Quality:   ytdlp.QualityLabel(v.Kind == store.KindAudio, cmpOr(v.Quality, "best")),
-		State:     label(string(v.State)),
+		Kind:      l.T(label(string(v.Kind))),
+		Quality:   qualityText(l, v.Kind == store.KindAudio, v.Quality),
+		State:     l.T(label(string(v.State))),
 		Thumbnail: httpsURL(v.Thumbnail),
 		Sub:       v.SubName,
 		Meta:      metaText(v),
 		Percent:   -1,
-		Error:     v.Error,
+		Error:     l.saved(jobErrors, v.Error),
 		When:      v.CreatedAt.Local().Format("2006-01-02 15:04"),
 		CanCancel: v.Active(),
 		CanRetry:  v.State == store.Failed || v.State == store.Canceled,
 		CanRemove: !v.Active(),
+		Target:    "#jobs",
 	}
 	for i, name := range v.Files {
 		l := fileLink{Name: name}
@@ -491,7 +521,7 @@ func (s *Server) toRow(v jobs.View) row {
 	}
 	r.StateKey = strings.ToLower(string(v.State))
 	r.StateText = r.State
-	r.Ago = ago(v.CreatedAt, s.clock())
+	r.Ago = ago(l, v.CreatedAt, s.clock())
 	r.WhenISO = v.CreatedAt.UTC().Format(time.RFC3339)
 	switch {
 	case len(r.Files) > 0 && s.files != nil:
@@ -511,7 +541,7 @@ func (s *Server) toRow(v jobs.View) row {
 		if p := v.Live.Percent(); p >= 0 {
 			r.Percent = int(p)
 		}
-		r.Progress = progressText(*v.Live)
+		r.Progress = progressText(l, *v.Live)
 	}
 	return r
 }
@@ -525,17 +555,17 @@ func (s *Server) clock() time.Time {
 
 // ago says how long before now t was, e.g. "5 min ago", or gives the date
 // after a week.
-func ago(t, now time.Time) string {
+func ago(l lang, t, now time.Time) string {
 	d := now.Sub(t)
 	switch {
 	case d < time.Minute:
-		return "just now"
+		return l.T("just now")
 	case d < time.Hour:
-		return fmt.Sprintf("%d min ago", int(d.Minutes()))
+		return l.F("%d min ago", int(d.Minutes()))
 	case d < 24*time.Hour:
-		return fmt.Sprintf("%d h ago", int(d.Hours()))
+		return l.F("%d h ago", int(d.Hours()))
 	case d < 7*24*time.Hour:
-		return fmt.Sprintf("%d d ago", int(d.Hours()/24))
+		return l.F("%d d ago", int(d.Hours()/24))
 	}
 	return t.Local().Format("2006-01-02")
 }
@@ -581,23 +611,23 @@ func label(s string) string {
 
 // progressText says how far a running job is, e.g.
 // "12.3 MiB of 40.0 MiB, 1.2 MiB/s, 0:35 left".
-func progressText(l jobs.Live) string {
+func progressText(l lang, p jobs.Live) string {
 	var parts []string
 	switch {
-	case l.Total > 0 && l.Downloaded >= l.Total:
-		return "Processing"
-	case l.Total > 0:
-		parts = append(parts, size(l.Downloaded)+" of "+size(l.Total))
-	case l.Downloaded > 0:
-		parts = append(parts, size(l.Downloaded))
+	case p.Total > 0 && p.Downloaded >= p.Total:
+		return l.T("Processing")
+	case p.Total > 0:
+		parts = append(parts, l.F("%s of %s", size(p.Downloaded), size(p.Total)))
+	case p.Downloaded > 0:
+		parts = append(parts, size(p.Downloaded))
 	default:
-		return "Starting"
+		return l.T("Starting")
 	}
-	if l.Speed > 0 {
-		parts = append(parts, size(int64(l.Speed))+"/s")
+	if p.Speed > 0 {
+		parts = append(parts, size(int64(p.Speed))+"/s")
 	}
-	if l.ETA >= 0 {
-		parts = append(parts, clock(l.ETA)+" left")
+	if p.ETA >= 0 {
+		parts = append(parts, l.F("%s left", clock(p.ETA)))
 	}
 	return strings.Join(parts, ", ")
 }
@@ -628,11 +658,11 @@ func isHTMX(r *http.Request) bool { return r.Header.Get("HX-Request") == "true" 
 
 func (s *Server) index(w http.ResponseWriter, r *http.Request) {
 	f := readFilter(r)
-	s.render(w, http.StatusOK, "index", s.page(r, pageData{List: s.listData(f, ""), Filter: f}))
+	s.render(w, r, http.StatusOK, "index", s.page(r, pageData{List: s.listData(requestLang(r), f, ""), Filter: f}))
 }
 
 func (s *Server) list(w http.ResponseWriter, r *http.Request) {
-	s.render(w, http.StatusOK, "jobs", s.listData(readFilter(r), ""))
+	s.render(w, r, http.StatusOK, "jobs", s.listData(requestLang(r), readFilter(r), ""))
 }
 
 // splitURLs returns the non-empty lines of raw, trimmed.
@@ -649,36 +679,36 @@ func splitURLs(raw string) []string {
 // queue checks every URL first and queues them only when all are valid. It
 // returns how many were queued, a message for the page (empty on success),
 // and the URLs left unqueued when a submission failed partway.
-func (s *Server) queue(f formValues, kind store.Kind, quality string) (int, string, string) {
+func (s *Server) queue(l lang, f formValues, kind store.Kind, quality string) (int, string, string) {
 	urls := splitURLs(f.URL)
 	switch {
 	case len(urls) == 0:
-		return 0, s.userMessage(jobs.ErrBadURL), ""
+		return 0, s.userMessage(l, jobs.ErrBadURL), ""
 	case len(urls) > maxURLs:
-		return 0, fmt.Sprintf("Enter at most %d URLs at a time.", maxURLs), ""
+		return 0, l.F("Enter at most %d URLs at a time.", maxURLs), ""
 	case len(urls) > 1 && kind == store.KindAudio && strings.HasPrefix(quality, "fmt-"):
-		return 0, "An original format belongs to one video. With several URLs, choose Best or an MP3 bitrate.", ""
+		return 0, l.T("An original format belongs to one video. With several URLs, choose Best or an MP3 bitrate."), ""
 	}
 	if len(urls) == 1 && kind == store.KindAudio && strings.HasPrefix(quality, "fmt-") {
-		if msg := s.formatMessage(f, quality); msg != "" {
+		if msg := s.formatMessage(l, f, quality); msg != "" {
 			return 0, msg, ""
 		}
 	}
 	for i, u := range urls {
 		if _, err := jobs.CheckURL(u); err != nil {
 			if len(urls) == 1 {
-				return 0, s.userMessage(err), ""
+				return 0, s.userMessage(l, err), ""
 			}
-			return 0, fmt.Sprintf("Line %d: %s", i+1, s.userMessage(err)), ""
+			return 0, l.F("Line %d: %s", i+1, s.userMessage(l, err)), ""
 		}
 	}
 	for i, u := range urls {
 		if _, err := s.jobs.Submit(u, kind, quality); err != nil {
-			msg := s.userMessage(err)
+			msg := s.userMessage(l, err)
 			if i == 0 {
 				return 0, msg, ""
 			}
-			return i, fmt.Sprintf("Queued %d of %d URLs, then: %s The URLs left are still in the box.", i, len(urls), msg), strings.Join(urls[i:], "\n")
+			return i, l.F("Queued %d of %d URLs, then: %s The URLs left are still in the box.", i, len(urls), msg), strings.Join(urls[i:], "\n")
 		}
 	}
 	return len(urls), "", ""
@@ -692,39 +722,40 @@ func (s *Server) submit(w http.ResponseWriter, r *http.Request) {
 	}
 	f := readForm(r)
 	lf := readFilter(r)
+	l := requestLang(r)
 	kind := store.Kind(f.Kind)
 	quality := f.VideoQuality
 	if kind == store.KindAudio {
 		quality = f.AudioQuality
 	}
-	queued, msg, rest := s.queue(f, kind, quality)
+	queued, msg, rest := s.queue(l, f, kind, quality)
 	switch {
 	case isHTMX(r) && msg != "" && queued == 0:
 		w.Header().Set("X-Ukai-Error", "1")
-		s.render(w, http.StatusOK, "jobs", s.listData(lf, msg))
+		s.render(w, r, http.StatusOK, "jobs", s.listData(l, lf, msg))
 	case isHTMX(r) && msg != "":
 		// Part of the batch was queued: keep the choices, and leave only the
 		// URLs that were not queued in the box.
 		w.Header().Set("X-Ukai-Error", "1")
-		s.render(w, http.StatusOK, "partial", struct {
+		s.render(w, r, http.StatusOK, "partial", struct {
 			List listData
 			Box  urlBox
-		}{s.listData(lf, msg), urlBox{Value: rest, OOB: true}})
+		}{s.listData(l, lf, msg), urlBox{Value: rest, OOB: true}})
 	case isHTMX(r):
 		// Queued: put the choices back to the defaults for the next URL, and
 		// keep the kind.
 		o := options(formValues{Kind: f.Kind}, nil)
 		o.OOB = true
-		s.render(w, http.StatusOK, "submitted", struct {
+		s.render(w, r, http.StatusOK, "submitted", struct {
 			List    listData
 			Options optionsData
-		}{s.listData(lf, msg), o})
+		}{s.listData(l, lf, msg), o})
 	case msg != "":
 		box := f.URL
 		if queued > 0 {
 			box = rest
 		}
-		s.render(w, http.StatusBadRequest, "index", s.page(r, pageData{List: s.listData(lf, ""), Filter: lf, URL: box, Options: options(f, nil), Error: msg}))
+		s.render(w, r, http.StatusBadRequest, "index", s.page(r, pageData{List: s.listData(l, lf, ""), Filter: lf, URL: box, Options: options(f, nil), Error: msg}))
 	default:
 		http.Redirect(w, r, home(lf), http.StatusSeeOther)
 	}
@@ -741,21 +772,21 @@ func home(f filter) string {
 // formatMessage says why the original format q cannot be downloaded from
 // f.URL, or returns "". Format IDs belong to the video they were looked up
 // for, so q must be in an unexpired lookup of the same URL.
-func (s *Server) formatMessage(f formValues, q string) string {
+func (s *Server) formatMessage(l lang, f formValues, q string) string {
 	u, err := jobs.CheckURL(f.URL)
 	if err != nil {
-		return s.userMessage(err)
+		return s.userMessage(l, err)
 	}
 	if !sameURL(f.URL, f.ProbedURL) {
 		// The URL was changed after the lookup.
-		return "The listed formats belong to another URL. Look up the qualities again or choose Best."
+		return l.T("The listed formats belong to another URL. Look up the qualities again or choose Best.")
 	}
 	offered, ok := s.probes.offered(u)
 	switch {
 	case !ok:
-		return "The lookup for this URL has expired or was lost in a restart. Look up the qualities again or choose Best."
+		return l.T("The lookup for this URL has expired or was lost in a restart. Look up the qualities again or choose Best.")
 	case !slices.Contains(offered, q):
-		return "The lookup for this URL did not list this format. Look up the qualities again or choose Best."
+		return l.T("The lookup for this URL did not list this format. Look up the qualities again or choose Best.")
 	}
 	return ""
 }
@@ -776,13 +807,14 @@ func (s *Server) probe(w http.ResponseWriter, r *http.Request) {
 	}
 	f := readForm(r)
 	f.ProbedURL = ""
+	l := requestLang(r)
 	o := options(f, nil)
 	if len(splitURLs(f.URL)) > 1 {
-		o.Error = "Show qualities works on one URL at a time."
+		o.Error = l.T("Show qualities works on one URL at a time.")
 	} else if u, err := jobs.CheckURL(f.URL); err != nil {
-		o.Error = label(err.Error()) + "."
+		o.Error = l.T(label(err.Error()) + ".")
 	} else if found, err := s.lookup(r.Context(), u); err != nil {
-		o.Error = s.probeMessage(err)
+		o.Error = s.probeMessage(l, err)
 	} else {
 		// A choice from an earlier lookup may not exist for this video.
 		if !has(found.Video, f.VideoQuality) {
@@ -796,7 +828,7 @@ func (s *Server) probe(w http.ResponseWriter, r *http.Request) {
 		s.probes.remember(u, found.Audio)
 	}
 	if isHTMX(r) {
-		s.render(w, http.StatusOK, "options", o)
+		s.render(w, r, http.StatusOK, "options", o)
 		return
 	}
 	status := http.StatusOK
@@ -804,7 +836,7 @@ func (s *Server) probe(w http.ResponseWriter, r *http.Request) {
 		status = http.StatusBadRequest
 	}
 	lf := readFilter(r)
-	s.render(w, status, "index", s.page(r, pageData{List: s.listData(lf, ""), Filter: lf, URL: f.URL, Options: o}))
+	s.render(w, r, status, "index", s.page(r, pageData{List: s.listData(l, lf, ""), Filter: lf, URL: f.URL, Options: o}))
 }
 
 // lookup runs the prober within probeTimeout and probeSlots.
@@ -825,20 +857,20 @@ func (s *Server) lookup(ctx context.Context, u string) (ytdlp.Formats, error) {
 
 var errNoProber = errors.New("looking up qualities is turned off")
 
-func (s *Server) probeMessage(err error) string {
+func (s *Server) probeMessage(l lang, err error) string {
 	var ye *ytdlp.Error
 	switch {
 	case errors.Is(err, context.DeadlineExceeded):
-		return "Looking up the qualities took too long. Try again, or download at the best quality."
+		return l.T("Looking up the qualities took too long. Try again, or download at the best quality.")
 	case errors.Is(err, errNoProber), errors.Is(err, ytdlp.ErrPlaylist):
-		return label(err.Error()) + "."
+		return l.T(label(err.Error()) + ".")
 	case errors.As(err, &ye):
-		return "yt-dlp could not read this URL: " + ye.Message
+		return l.F("yt-dlp could not read this URL: %s", ye.Message)
 	case errors.Is(err, context.Canceled):
-		return "The lookup was canceled."
+		return l.T("The lookup was canceled.")
 	default:
 		s.log.Error("quality lookup failed", "err", err)
-		return "Something went wrong on the server. See the ukai log."
+		return l.T("Something went wrong on the server. See the ukai log.")
 	}
 }
 
@@ -856,13 +888,29 @@ func (s *Server) remove(w http.ResponseWriter, r *http.Request) {
 	s.act(w, r, func() error { return s.jobs.Remove(r.PathValue("id"), deleteFiles(r)) })
 }
 
-// clear takes every finished job off the list, and deletes their files too
-// when the form posts files=1.
+// clear takes the finished downloads no subscription queued off the list,
+// and deletes their files too when the form posts files=1.
 func (s *Server) clear(w http.ResponseWriter, r *http.Request) {
 	s.act(w, r, func() error {
-		_, err := s.jobs.ClearFinished(deleteFiles(r))
+		mine, shown := onDownloads(s.liveSubs()), shownBefore(r)
+		_, err := s.jobs.ClearFinished(deleteFiles(r), func(sub string, at time.Time) bool { return mine(sub) && shown(at) })
 		return err
 	})
+}
+
+// shownBefore narrows a clear to the jobs that had finished when the page
+// drew its button, so one that ends while the dialog is open stays. A form
+// without the field takes every finished job, and a bad one takes none.
+func shownBefore(r *http.Request) func(time.Time) bool {
+	v := r.PostForm.Get("upto")
+	if v == "" {
+		return func(time.Time) bool { return true }
+	}
+	upto, err := time.Parse(time.RFC3339Nano, v)
+	if err != nil {
+		return func(time.Time) bool { return false }
+	}
+	return func(at time.Time) bool { return !at.After(upto) }
 }
 
 // deleteFiles reports whether a posted form asks for the files to go too.
@@ -878,15 +926,21 @@ func (s *Server) act(w http.ResponseWriter, r *http.Request, do func() error) {
 		return
 	}
 	f := readFilter(r)
+	l := requestLang(r)
 	err := do()
-	msg := s.userMessage(err)
+	msg := s.userMessage(l, err)
+	if r.PostForm.Get("from") == "subs" && s.subs != nil {
+		// A button on a subscription's download shows the subscriptions again.
+		s.subsAfter(w, r, err, msg, false)
+		return
+	}
 	switch {
 	case isHTMX(r):
-		s.render(w, http.StatusOK, "jobs", s.listData(f, msg))
+		s.render(w, r, http.StatusOK, "jobs", s.listData(l, f, msg))
 	case errors.Is(err, jobs.ErrNotFound):
-		s.render(w, http.StatusNotFound, "index", s.page(r, pageData{List: s.listData(f, ""), Filter: f, Error: msg}))
+		s.render(w, r, http.StatusNotFound, "index", s.page(r, pageData{List: s.listData(l, f, ""), Filter: f, Error: msg}))
 	case msg != "":
-		s.render(w, http.StatusConflict, "index", s.page(r, pageData{List: s.listData(f, ""), Filter: f, Error: msg}))
+		s.render(w, r, http.StatusConflict, "index", s.page(r, pageData{List: s.listData(l, f, ""), Filter: f, Error: msg}))
 	default:
 		http.Redirect(w, r, home(f), http.StatusSeeOther)
 	}
@@ -950,25 +1004,26 @@ func (s *Server) file(w http.ResponseWriter, r *http.Request) {
 
 // userMessage turns an error into text for the page. Errors the user cannot
 // fix are logged and shown in general terms.
-func (s *Server) userMessage(err error) string {
+func (s *Server) userMessage(l lang, err error) string {
 	switch {
 	case err == nil:
 		return ""
 	case errors.Is(err, jobs.ErrBadURL), errors.Is(err, jobs.ErrBadKind), errors.Is(err, jobs.ErrBadQuality),
 		errors.Is(err, jobs.ErrNotFound), errors.Is(err, jobs.ErrNotActive),
 		errors.Is(err, jobs.ErrActive), errors.Is(err, jobs.ErrNoRetry):
-		return label(err.Error()) + "."
+		return l.T(label(err.Error()) + ".")
 	case errors.Is(err, jobs.ErrSave), errors.Is(err, jobs.ErrDelete):
-		return label(err.Error()) + ". See the ukai log."
+		return l.T(label(err.Error()) + ". See the ukai log.")
 	default:
 		s.log.Error("request failed", "err", err)
-		return "Something went wrong on the server. See the ukai log."
+		return l.T("Something went wrong on the server. See the ukai log.")
 	}
 }
 
-func (s *Server) render(w http.ResponseWriter, status int, name string, data any) {
+// render shows a template in the language the request chose.
+func (s *Server) render(w http.ResponseWriter, r *http.Request, status int, name string, data any) {
 	var buf bytes.Buffer
-	if err := s.tpl.ExecuteTemplate(&buf, name, data); err != nil {
+	if err := s.tpls[requestLang(r)].ExecuteTemplate(&buf, name, data); err != nil {
 		s.log.Error("render failed", "template", name, "err", err)
 		http.Error(w, "render failed", http.StatusInternalServerError)
 		return

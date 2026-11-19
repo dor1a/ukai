@@ -36,6 +36,7 @@ type stubJobs struct {
 	// removedFiles and clearedFiles record each call's deleteFiles.
 	removedFiles []bool
 	clearedFiles []bool
+	clearedIn    []func(string, time.Time) bool
 	actErr       error
 	failAt       int
 	calls        int
@@ -75,11 +76,12 @@ func (s *stubJobs) Remove(id string, deleteFiles bool) error {
 	return s.actErr
 }
 
-func (s *stubJobs) ClearFinished(deleteFiles bool) (int, error) {
+func (s *stubJobs) ClearFinished(deleteFiles bool, in func(string, time.Time) bool) (int, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.cleared++
 	s.clearedFiles = append(s.clearedFiles, deleteFiles)
+	s.clearedIn = append(s.clearedIn, in)
 	return 0, s.actErr
 }
 
@@ -487,7 +489,7 @@ func TestProgressText(t *testing.T) {
 		{jobs.Live{Downloaded: 4 << 20, Total: 4 << 20, Speed: 10, ETA: 0}, "Processing"},
 		{jobs.Live{Downloaded: 100, Total: 1000, Speed: 50, ETA: 3725}, "100 B of 1000 B, 50 B/s, 1:02:05 left"},
 	} {
-		if got := progressText(tc.l); got != tc.want {
+		if got := progressText(english, tc.l); got != tc.want {
 			t.Errorf("progressText(%+v) = %q, want %q", tc.l, got, tc.want)
 		}
 	}
@@ -500,7 +502,7 @@ func TestFooterLinksTheSource(t *testing.T) {
 			h = subsServer(t, sampleSubs())
 		}
 		b := do(h, "GET", target, nil, nil).Body.String()
-		if !strings.Contains(b, `<span>ukai test</span><a href="https://github.com/dor1a/ukai" rel="noopener" title="Source on GitHub"`) {
+		if !strings.Contains(b, `<span>ukai test</span>`) || !strings.Contains(b, `<a href="https://github.com/dor1a/ukai" rel="noopener" title="Source on GitHub"`) {
 			t.Errorf("%s: footer lacks the GitHub link", target)
 		}
 	}

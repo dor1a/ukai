@@ -1,32 +1,32 @@
 {{define "top" -}}
 <!doctype html>
-<html lang="en">
+<html lang="{{lang}}">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="htmx-config" content='{"includeIndicatorStyles":false,"allowEval":false}'>
-<title>{{if eq .Page "subs"}}Subscriptions · {{else if eq .Page "notice"}}{{.Title}} · {{end}}ukai</title>
+<title>{{if eq .Page "subs"}}{{t "Subscriptions"}} - {{else if eq .Page "notice"}}{{.Title}} - {{end}}ukai</title>
 <link rel="icon" href="{{asset "favicon.svg"}}">
 <link rel="stylesheet" href="{{asset "style.css"}}">
 <script src="{{asset "mode.js"}}"></script>
 <script src="{{asset "htmx.min.js"}}" defer></script>
 <script src="{{asset "app.js"}}" defer></script>
 </head>
-<body>
+<body hx-headers='{"{{langHeader}}": "{{lang}}"}'>
 <header class="topbar">
   <div class="wrap topbar-in">
     <a class="brand" href="/"><img src="{{asset "favicon.svg"}}" alt="" width="30" height="30"><span>ukai</span></a>
-    {{if ne .Page "notice"}}<nav class="tabs" aria-label="Pages">
-      <a href="/"{{if eq .Page ""}} aria-current="page"{{end}}>Downloads</a>
-      <a href="/subs"{{if eq .Page "subs"}} aria-current="page"{{end}}>Subscriptions</a>
+    {{if ne .Page "notice"}}<nav class="tabs" aria-label="{{t "Pages"}}">
+      <a href="/"{{if eq .Page ""}} aria-current="page"{{end}}>{{t "Downloads"}}</a>
+      <a href="/subs"{{if eq .Page "subs"}} aria-current="page"{{end}}>{{t "Subscriptions"}}</a>
     </nav>{{end}}
-    <button type="button" id="mode-toggle" class="icon-btn" hidden>
-      <svg class="i-sun" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="4.2"/><path d="M12 2.5v2.3M12 19.2v2.3M2.5 12h2.3M19.2 12h2.3M5.3 5.3l1.6 1.6M17.1 17.1l1.6 1.6M5.3 18.7l1.6-1.6M17.1 6.9l1.6-1.6"/></svg>
-      <svg class="i-moon" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 14.6A8.2 8.2 0 0 1 9.4 4a8.2 8.2 0 1 0 10.6 10.6z"/></svg>
-    </button>
+    <details class="more lang-menu">
+      <summary class="icon-btn" title="{{t "Language"}}" aria-label="{{t "Language"}}"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c2.5 2.6 3.8 5.6 3.8 9s-1.3 6.4-3.8 9M12 3c-2.5 2.6-3.8 5.6-3.8 9s1.3 6.4 3.8 9"/></svg></summary>
+      <form class="menu" method="post" action="/lang"><input type="hidden" name="back" value="{{.Back}}">{{range langs}}<button type="submit" name="lang" value="{{.Code}}" lang="{{.Code}}" class="menu-item"{{if .Current}} aria-current="true"{{end}}>{{.Name}}</button>{{end}}</form>
+    </details>
     {{with .User}}<div class="account">
-      <span class="who" title="Signed in as {{.Name}}"><span class="face" aria-hidden="true">{{.Initial}}{{with .Avatar}}<img src="{{.}}" alt="" width="28" height="28">{{end}}</span><span class="name">{{.Name}}</span></span>
-      <a class="icon-btn" href="{{.LogoutURL}}" title="Sign out" aria-label="Sign out"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 4h3a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2h-3M10 8l-4 4 4 4M6 12h10"/></svg></a>
+      <span class="who" title="{{tf "Signed in as %s" .Name}}"><span class="face" aria-hidden="true">{{.Initial}}{{with .Avatar}}<img src="{{.}}" alt="" width="28" height="28">{{end}}</span><span class="name">{{.Name}}</span></span>
+      <a class="icon-btn" href="{{.LogoutURL}}" title="{{t "Sign out"}}" aria-label="{{t "Sign out"}}"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 4h3a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2h-3M10 8l-4 4 4 4M6 12h10"/></svg></a>
     </div>{{end}}
   </div>
 </header>
@@ -35,7 +35,11 @@
 
 {{define "bottom" -}}
 </main>
-<footer class="wrap colophon"><span>ukai {{.Version}}</span><a href="https://github.com/dor1a/ukai" rel="noopener" title="Source on GitHub" aria-label="Source on GitHub"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M6.766 11.328c-2.063-.25-3.516-1.734-3.516-3.656 0-.781.281-1.625.75-2.188-.203-.515-.172-1.609.063-2.062.625-.078 1.468.25 1.968.703.594-.187 1.219-.281 1.985-.281.765 0 1.39.094 1.953.265.484-.437 1.344-.765 1.969-.687.218.422.25 1.515.046 2.047.5.593.766 1.39.766 2.203 0 1.922-1.453 3.375-3.547 3.64.531.344.89 1.094.89 1.954v1.625c0 .468.391.734.86.547C13.781 14.359 16 11.53 16 8.03 16 3.61 12.406 0 7.984 0 3.563 0 0 3.61 0 8.031a7.88 7.88 0 0 0 5.172 7.422c.422.156.828-.125.828-.547v-1.25c-.219.094-.5.156-.75.156-1.031 0-1.64-.562-2.078-1.609-.172-.422-.36-.672-.719-.719-.187-.015-.25-.093-.25-.187 0-.188.313-.328.625-.328.453 0 .844.281 1.25.86.313.452.64.655 1.031.655s.641-.14 1-.5c.266-.265.47-.5.657-.656"/></svg></a></footer>
+<footer class="wrap colophon"><span>ukai {{.Version}}</span><a href="https://github.com/dor1a/ukai" rel="noopener" title="{{t "Source on GitHub"}}" aria-label="{{t "Source on GitHub"}}"><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M6.766 11.328c-2.063-.25-3.516-1.734-3.516-3.656 0-.781.281-1.625.75-2.188-.203-.515-.172-1.609.063-2.062.625-.078 1.468.25 1.968.703.594-.187 1.219-.281 1.985-.281.765 0 1.39.094 1.953.265.484-.437 1.344-.765 1.969-.687.218.422.25 1.515.046 2.047.5.593.766 1.39.766 2.203 0 1.922-1.453 3.375-3.547 3.64.531.344.89 1.094.89 1.954v1.625c0 .468.391.734.86.547C13.781 14.359 16 11.53 16 8.03 16 3.61 12.406 0 7.984 0 3.563 0 0 3.61 0 8.031a7.88 7.88 0 0 0 5.172 7.422c.422.156.828-.125.828-.547v-1.25c-.219.094-.5.156-.75.156-1.031 0-1.64-.562-2.078-1.609-.172-.422-.36-.672-.719-.719-.187-.015-.25-.093-.25-.187 0-.188.313-.328.625-.328.453 0 .844.281 1.25.86.313.452.64.655 1.031.655s.641-.14 1-.5c.266-.265.47-.5.657-.656"/></svg></a></footer>
+<button type="button" id="mode-toggle" class="mode-toggle" data-to-light="{{t "Switch to light mode"}}" data-to-dark="{{t "Switch to dark mode"}}" hidden>
+  <svg class="i-sun" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="4.2"/><path d="M12 2.5v2.3M12 19.2v2.3M2.5 12h2.3M19.2 12h2.3M5.3 5.3l1.6 1.6M17.1 17.1l1.6 1.6M5.3 18.7l1.6-1.6M17.1 6.9l1.6-1.6"/></svg>
+  <svg class="i-moon" viewBox="0 0 24 24" aria-hidden="true"><path d="M20 14.6A8.2 8.2 0 0 1 9.4 4a8.2 8.2 0 1 0 10.6 10.6z"/></svg>
+</button>
 </body>
 </html>
 {{- end}}
@@ -43,17 +47,17 @@
 {{define "index" -}}
 {{template "top" .}}
 <form class="card compose submit" method="post" action="/jobs" hx-post="/jobs" hx-target="#jobs" hx-swap="outerHTML" hx-include="#filter" hx-sync="#jobs:replace">
-  <label for="url" class="sr-only">Video URL</label>
+  <label for="url" class="sr-only">{{t "Video URL"}}</label>
   <div class="compose-main">
     {{template "urlbox" .URLBox}}
   </div>
   <div class="compose-bar">
     {{template "options" .Options}}
-    <button type="submit" class="link" formaction="/probe" hx-post="/probe" hx-target="#options" hx-swap="outerHTML" hx-indicator="#looking" hx-disabled-elt="this">Show qualities</button>
-    <span id="looking" class="indicator" role="status">Asking yt-dlp…</span>
+    <button type="submit" class="link" formaction="/probe" hx-post="/probe" hx-target="#options" hx-swap="outerHTML" hx-indicator="#looking" hx-disabled-elt="this">{{t "Show qualities"}}</button>
+    <span id="looking" class="indicator" role="status">{{t "Asking yt-dlp…"}}</span>
     <div class="compose-go">
-      <span class="hint">Enter downloads, Shift+Enter adds a line for another URL</span>
-      <button type="submit" class="primary">Download</button>
+      <span class="hint">{{t "Enter downloads, Shift+Enter adds a line for another URL"}}</span>
+      <button type="submit" class="primary">{{t "Download"}}</button>
     </div>
   </div>
   {{with .Error}}<p class="error" role="alert">{{.}}</p>{{end}}
@@ -62,66 +66,53 @@
 <form id="filter" class="toolbar" method="get" action="/" hx-get="/jobs" hx-target="#jobs" hx-swap="outerHTML" hx-trigger="input changed delay:300ms from:#q, change" hx-sync="#jobs:replace">
   <label class="search">
     <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
-    <input id="q" name="q" type="search" placeholder="Search title, uploader or URL" aria-label="Search title, uploader or URL" value="{{.Filter.Q}}">
+    <input id="q" name="q" type="search" placeholder="{{t "Search title, uploader or URL"}}" aria-label="{{t "Search title, uploader or URL"}}" value="{{.Filter.Q}}">
   </label>
-  <div class="segmented" role="radiogroup" aria-label="Kind">
-    <label><input type="radio" name="show" value=""{{if eq .Filter.Show ""}} checked{{end}}><span>All</span></label>
-    <label><input type="radio" name="show" value="video"{{if eq .Filter.Show "video"}} checked{{end}}><span>Video</span></label>
-    <label><input type="radio" name="show" value="audio"{{if eq .Filter.Show "audio"}} checked{{end}}><span>Audio</span></label>
+  <div class="segmented" role="radiogroup" aria-label="{{t "Kind"}}">
+    <label><input type="radio" name="show" value=""{{if eq .Filter.Show ""}} checked{{end}}><span>{{t "All"}}</span></label>
+    <label><input type="radio" name="show" value="video"{{if eq .Filter.Show "video"}} checked{{end}}><span>{{t "Video"}}</span></label>
+    <label><input type="radio" name="show" value="audio"{{if eq .Filter.Show "audio"}} checked{{end}}><span>{{t "Audio"}}</span></label>
   </div>
-  <select name="order" aria-label="Order">
-    <option value="">Newest first</option>
-    <option value="oldest"{{if eq .Filter.Order "oldest"}} selected{{end}}>Oldest first</option>
+  <select name="order" aria-label="{{t "Order"}}">
+    <option value="">{{t "Newest first"}}</option>
+    <option value="oldest"{{if eq .Filter.Order "oldest"}} selected{{end}}>{{t "Oldest first"}}</option>
   </select>
-  <noscript><button type="submit" class="ghost">Apply</button></noscript>
+  <noscript><button type="submit" class="ghost">{{t "Apply"}}</button></noscript>
 </form>
 
 {{template "jobs" .List}}
 
-<dialog id="remove-dialog" class="confirm" aria-labelledby="remove-heading">
-  <form method="dialog">
-    <h2 id="remove-heading"></h2>
-    <p class="what"></p>
-    <div class="files">
-      <p>The downloaded files are deleted too. A file that another listed download also uses stays.</p>
-      <label class="keep"><input type="checkbox" name="keep"> Keep the files</label>
-    </div>
-    <div class="dialog-actions">
-      <button type="submit" value="cancel" class="ghost" autofocus>Cancel</button>
-      <button type="submit" value="confirm" class="primary danger"></button>
-    </div>
-  </form>
-</dialog>
+{{template "removedialog"}}
 {{template "bottom" .}}
 {{- end}}
 
 {{define "options" -}}
 <div id="options" class="options"{{if .OOB}} hx-swap-oob="true"{{end}}>
   <input type="hidden" name="probed_url" value="{{.ProbedURL}}">
-  <div class="segmented" role="radiogroup" aria-label="Save as">
-    <label><input type="radio" name="kind" value="video"{{if ne .Kind "audio"}} checked{{end}}><span>Video</span></label>
-    <label><input type="radio" name="kind" value="audio"{{if eq .Kind "audio"}} checked{{end}}><span>Audio</span></label>
+  <div class="segmented" role="radiogroup" aria-label="{{t "Save as"}}">
+    <label><input type="radio" name="kind" value="video"{{if ne .Kind "audio"}} checked{{end}}><span>{{t "Video"}}</span></label>
+    <label><input type="radio" name="kind" value="audio"{{if eq .Kind "audio"}} checked{{end}}><span>{{t "Audio"}}</span></label>
   </div>
-  <select name="video_quality" class="q-video" aria-label="Video quality">
-    <option value="best"{{if eq .VideoQuality "best"}} selected{{end}}>Best</option>
+  <select name="video_quality" class="q-video" aria-label="{{t "Video quality"}}">
+    <option value="best"{{if eq .VideoQuality "best"}} selected{{end}}>{{t "Best"}}</option>
     {{- with .Heights}}
-    <optgroup label="Up to">{{range .}}<option value="{{.Value}}"{{if eq .Value $.VideoQuality}} selected{{end}}>{{.Label}}</option>{{end}}</optgroup>
+    <optgroup label="{{t "Up to"}}">{{range .}}<option value="{{.Value}}"{{if eq .Value $.VideoQuality}} selected{{end}}>{{.Label}}</option>{{end}}</optgroup>
     {{- end}}
   </select>
-  <select name="audio_quality" class="q-audio" aria-label="Audio quality">
-    <option value="best"{{if eq .AudioQuality "best"}} selected{{end}}>Best (original)</option>
+  <select name="audio_quality" class="q-audio" aria-label="{{t "Audio quality"}}">
+    <option value="best"{{if eq .AudioQuality "best"}} selected{{end}}>{{t "Best (original)"}}</option>
     {{- with .Formats}}
-    <optgroup label="Original format">{{range .}}<option value="{{.Value}}"{{if eq .Value $.AudioQuality}} selected{{end}}>{{.Label}}</option>{{end}}</optgroup>
+    <optgroup label="{{t "Original format"}}">{{range .}}<option value="{{.Value}}"{{if eq .Value $.AudioQuality}} selected{{end}}>{{.Label}}</option>{{end}}</optgroup>
     {{- end}}
-    <optgroup label="Convert to MP3">{{range .MP3}}<option value="{{.Value}}"{{if eq .Value $.AudioQuality}} selected{{end}}>{{.Label}}</option>{{end}}</optgroup>
+    <optgroup label="{{t "Convert to MP3"}}">{{range .MP3}}<option value="{{.Value}}"{{if eq .Value $.AudioQuality}} selected{{end}}>{{.Label}}</option>{{end}}</optgroup>
   </select>
-  {{with .Title}}<p class="probed">Qualities of {{.}}</p>{{end}}
+  {{with .Title}}<p class="probed">{{tf "Qualities of %s" .}}</p>{{end}}
   {{with .Error}}<p class="error" role="alert">{{.}}</p>{{end}}
 </div>
 {{- end}}
 
 {{define "urlbox" -}}
-<textarea id="url" name="url" rows="1" required autocomplete="off" spellcheck="false" placeholder="Paste a video URL, or several, one per line"{{if .OOB}} hx-swap-oob="true"{{end}}>{{.Value}}</textarea>
+<textarea id="url" name="url" rows="1" required autocomplete="off" spellcheck="false" placeholder="{{t "Paste a video URL, or several, one per line"}}"{{if .OOB}} hx-swap-oob="true"{{end}}>{{.Value}}</textarea>
 {{- end}}
 
 {{define "partial" -}}
@@ -132,4 +123,21 @@
 {{define "submitted" -}}
 {{template "jobs" .List}}
 {{template "options" .Options}}
+{{- end}}
+
+{{define "removedialog" -}}
+<dialog id="remove-dialog" class="confirm" aria-labelledby="remove-heading">
+  <form method="dialog">
+    <h2 id="remove-heading"></h2>
+    <p class="what"></p>
+    <div class="files">
+      <p>{{t "The downloaded files are deleted too. A file that another listed download also uses stays."}}</p>
+      <label class="keep"><input type="checkbox" name="keep"> {{t "Keep the files"}}</label>
+    </div>
+    <div class="dialog-actions">
+      <button type="submit" value="cancel" class="ghost" autofocus>{{t "Cancel"}}</button>
+      <button type="submit" value="confirm" class="primary danger"></button>
+    </div>
+  </form>
+</dialog>
 {{- end}}

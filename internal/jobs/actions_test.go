@@ -108,14 +108,14 @@ func TestRemoveAndClearFinished(t *testing.T) {
 		}
 	}
 
-	n, err := m.ClearFinished(false)
+	n, err := m.ClearFinished(false, ownJobs)
 	if err != nil || n != 1 {
 		t.Fatalf("clear = %d, %v; want 1, nil", n, err)
 	}
 	if list := m.List(); len(list) != 1 || list[0].ID != running.ID {
 		t.Fatalf("after clear: %+v, want only the running job", list)
 	}
-	if n, err := m.ClearFinished(false); n != 0 || err != nil {
+	if n, err := m.ClearFinished(false, ownJobs); n != 0 || err != nil {
 		t.Fatalf("second clear = %d, %v; want 0, nil", n, err)
 	}
 	e.logs.want(t, "job removed", "was=done")
@@ -136,7 +136,7 @@ func TestRemoveAndClearRollBackWhenSaveFails(t *testing.T) {
 	if err := m.Remove(j.ID, false); !errors.Is(err, ErrSave) {
 		t.Fatalf("remove err = %v, want ErrSave", err)
 	}
-	if n, err := m.ClearFinished(false); n != 0 || !errors.Is(err, ErrSave) {
+	if n, err := m.ClearFinished(false, ownJobs); n != 0 || !errors.Is(err, ErrSave) {
 		t.Fatalf("clear = %d, %v; want 0, ErrSave", n, err)
 	}
 	if _, ok := m.Get(j.ID); !ok {
